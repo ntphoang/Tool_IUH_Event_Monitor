@@ -1,0 +1,10 @@
+target/
+
+.idea/
+*.iml
+
+iuh_cookie.txt
+activities.txt
+telegram_offset.txt
+
+.env

@@ -1,0 +1,19 @@
+services:
+  iuh-event-monitor:
+    build: .
+    container_name: iuh-event-monitor
+    restart: unless-stopped
+
+    env_file:
+      - .env
+
+    volumes:
+      - ./data:/app/data
+
+    working_dir: /app/data
+
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
