@@ -1,5 +1,6 @@
 package iuh.fit;
 
+import org.jsoup.Connection;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
@@ -15,10 +16,10 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.nio.file.StandardOpenOption;
-import java.time.Duration;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executors;
@@ -36,27 +37,15 @@ public class Main {
     private static final String IUH_URL =
             "https://doantn.iuh.edu.vn/doanvien.html@211@Tra-cuu";
 
-    /*
-     * Cookie IUH được lưu ở file này.
-     */
     private static final Path COOKIE_FILE =
             Paths.get("iuh_cookie.txt");
 
-    /*
-     * Lưu danh sách activity đã biết.
-     */
     private static final Path ACTIVITIES_FILE =
             Paths.get("activities.txt");
 
-    /*
-     * Lưu Telegram update_id cuối cùng đã xử lý.
-     */
     private static final Path TELEGRAM_OFFSET_FILE =
             Paths.get("telegram_offset.txt");
 
-    /*
-     * Biến môi trường.
-     */
     private static final String ENV_IUH_COOKIE =
             "IUH_COOKIE";
 
@@ -66,20 +55,34 @@ public class Main {
     private static final String ENV_CHAT_ID =
             "TELEGRAM_CHAT_ID";
 
-    /*
-     * HTTP client dùng chung.
-     */
+    // Check IUH mỗi 30 giây
+    private static final int ACTIVITY_CHECK_SECONDS = 30;
+
+    // Telegram polling mỗi 5 giây
+    private static final int TELEGRAM_CHECK_SECONDS = 5;
+
+    // Heartbeat mỗi 30 phút
+    private static final int HEARTBEAT_MINUTES = 30;
+
+    // =========================================================
+    // HTTP
+    // =========================================================
+
     private static final HttpClient HTTP_CLIENT =
             HttpClient.newBuilder()
-                    .connectTimeout(Duration.ofSeconds(10))
+                    .followRedirects(HttpClient.Redirect.NORMAL)
                     .build();
 
-    /*
-     * Tránh gửi thông báo cookie hết hạn nhiều lần.
-     */
-    private static volatile boolean cookieExpiredNotified =
-            false;
+    // =========================================================
+    // RUNTIME STATE
+    // =========================================================
 
+    private static volatile String currentCookie;
+
+    private static volatile boolean cookieExpiredNotified = false;
+
+    private static final DateTimeFormatter TIME_FORMATTER =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     // =========================================================
     // MAIN
@@ -87,108 +90,122 @@ public class Main {
 
     public static void main(String[] args) {
 
-        System.out.println("========================================");
-        System.out.println("       IUH EVENT MONITOR");
-        System.out.println("========================================");
-        System.out.println("IUH      : mỗi 1 phút");
-        System.out.println("Telegram : mỗi 5 giây");
-        System.out.println("========================================");
+        printBanner();
 
         initializeCookie();
 
         ScheduledExecutorService scheduler =
-                Executors.newScheduledThreadPool(2);
+                Executors.newScheduledThreadPool(3);
 
-        /*
-         * Check IUH mỗi 1 phút.
-         */
+        // -----------------------------------------------------
+        // 1. Check IUH mỗi 30 giây
+        // -----------------------------------------------------
+
         scheduler.scheduleAtFixedRate(
-                () -> {
-
-                    try {
-                        checkActivities();
-
-                    } catch (Exception e) {
-
-                        System.err.println(
-                                "❌ Lỗi check IUH: "
-                                        + e.getMessage()
-                        );
-                    }
-
-                },
+                Main::checkActivities,
                 0,
-                30,
+                ACTIVITY_CHECK_SECONDS,
                 TimeUnit.SECONDS
         );
 
-        /*
-         * Check Telegram mỗi 5 giây.
-         */
+        // -----------------------------------------------------
+        // 2. Check Telegram mỗi 5 giây
+        // -----------------------------------------------------
+
         scheduler.scheduleAtFixedRate(
-                () -> {
-
-                    try {
-                        checkTelegramMessages();
-
-                    } catch (Exception e) {
-
-                        System.err.println(
-                                "❌ Lỗi Telegram: "
-                                        + e.getMessage()
-                        );
-                    }
-
-                },
+                Main::checkTelegramMessages,
                 0,
-                5,
+                TELEGRAM_CHECK_SECONDS,
                 TimeUnit.SECONDS
         );
 
-        System.out.println("🚀 Tool đang chạy...");
+        // -----------------------------------------------------
+        // 3. Heartbeat mỗi 30 phút
+        // -----------------------------------------------------
+
+        scheduler.scheduleAtFixedRate(
+                Main::sendHeartbeat,
+                HEARTBEAT_MINUTES,
+                HEARTBEAT_MINUTES,
+                TimeUnit.MINUTES
+        );
+
+        System.out.println("🚀 Tool đang chạy...\n");
+
+        Runtime.getRuntime().addShutdownHook(
+                new Thread(() -> {
+                    System.out.println("\n🛑 Đang dừng tool...");
+                    scheduler.shutdown();
+                })
+        );
     }
 
+    // =========================================================
+    // BANNER
+    // =========================================================
+
+    private static void printBanner() {
+
+        System.out.println("========================================");
+        System.out.println("       IUH EVENT MONITOR");
+        System.out.println("========================================");
+        System.out.println(
+                "IUH      : mỗi " +
+                        ACTIVITY_CHECK_SECONDS +
+                        " giây"
+        );
+        System.out.println(
+                "Telegram : mỗi " +
+                        TELEGRAM_CHECK_SECONDS +
+                        " giây"
+        );
+        System.out.println(
+                "Heartbeat: mỗi " +
+                        HEARTBEAT_MINUTES +
+                        " phút"
+        );
+        System.out.println("========================================");
+    }
 
     // =========================================================
     // COOKIE
     // =========================================================
 
-    /**
-     * Khởi tạo cookie.
-     *
-     * Ưu tiên:
-     *
-     * 1. iuh_cookie.txt
-     * 2. IUH_COOKIE environment variable
-     */
     private static void initializeCookie() {
 
         try {
 
-            String cookie = loadCookie();
+            // Ưu tiên cookie đã lưu trong file
+            if (Files.exists(COOKIE_FILE)) {
 
-            if (cookie != null && !cookie.isBlank()) {
+                String cookie =
+                        Files.readString(COOKIE_FILE).trim();
 
-                System.out.println(
-                        "🍪 Đã load cookie IUH."
-                );
+                if (!cookie.isBlank()) {
 
-                return;
+                    currentCookie = cookie;
+
+                    System.out.println(
+                            "🍪 Đã load cookie IUH."
+                    );
+
+                    return;
+                }
             }
 
-            /*
-             * Nếu chưa có file thì thử environment variable.
-             */
+            // Nếu chưa có file thì thử ENV
             String envCookie =
                     System.getenv(ENV_IUH_COOKIE);
 
-            if (envCookie != null
-                    && !envCookie.isBlank()) {
+            if (envCookie != null &&
+                    !envCookie.isBlank()) {
 
-                saveCookie(envCookie);
+                currentCookie = envCookie.trim();
+
+                saveCookie(currentCookie);
 
                 System.out.println(
-                        "🍪 Đã lấy cookie từ IUH_COOKIE."
+                        "🍪 Đã load cookie IUH từ ENV."
                 );
 
                 return;
@@ -199,7 +216,7 @@ public class Main {
             );
 
             System.out.println(
-                    "Hãy gửi cookie cho Telegram bằng:"
+                    "📱 Hãy gửi Telegram:"
             );
 
             System.out.println(
@@ -209,65 +226,54 @@ public class Main {
         } catch (Exception e) {
 
             System.err.println(
-                    "❌ Không thể khởi tạo cookie: "
-                            + e.getMessage()
+                    "❌ Không thể load cookie: " +
+                            e.getMessage()
             );
         }
     }
 
+    private static synchronized void saveCookie(
+            String cookie
+    ) {
 
-    /**
-     * Đọc cookie từ file.
-     */
-    private static String loadCookie()
-            throws IOException {
+        try {
 
-        if (!Files.exists(COOKIE_FILE)) {
-            return null;
+            Files.writeString(
+                    COOKIE_FILE,
+                    cookie,
+                    StandardCharsets.UTF_8
+            );
+
+            currentCookie = cookie;
+
+            System.out.println(
+                    "💾 Đã lưu cookie IUH."
+            );
+
+        } catch (IOException e) {
+
+            System.err.println(
+                    "❌ Không thể lưu cookie: " +
+                            e.getMessage()
+            );
         }
-
-        return Files.readString(
-                COOKIE_FILE,
-                StandardCharsets.UTF_8
-        ).trim();
     }
-
-
-    /**
-     * Lưu cookie.
-     */
-    private static void saveCookie(
-            String cookie)
-            throws IOException {
-
-        Files.writeString(
-                COOKIE_FILE,
-                cookie.trim(),
-                StandardCharsets.UTF_8,
-                StandardOpenOption.CREATE,
-                StandardOpenOption.TRUNCATE_EXISTING
-        );
-
-        /*
-         * Cookie mới => có thể kiểm tra lại bình thường.
-         */
-        cookieExpiredNotified = false;
-    }
-
 
     // =========================================================
     // CHECK IUH
     // =========================================================
 
-    /**
-     * Kiểm tra hoạt động trên IUH.
-     */
-    private static void checkActivities()
-            throws Exception {
+    private static void checkActivities() {
 
-        String cookie = loadCookie();
+        System.out.println(
+                "\n[" +
+                        LocalDateTime.now()
+                                .format(TIME_FORMATTER) +
+                        "] Checking IUH..."
+        );
 
-        if (cookie == null || cookie.isBlank()) {
+        if (currentCookie == null ||
+                currentCookie.isBlank()) {
 
             System.out.println(
                     "⚠️ Chưa có cookie IUH."
@@ -276,542 +282,534 @@ public class Main {
             return;
         }
 
-        System.out.println(
-                "\n[" + java.time.LocalDateTime.now()
-                        + "] Checking IUH..."
-        );
+        try {
 
-        /*
-         * Request IUH.
-         */
-        Document doc =
-                Jsoup.connect(IUH_URL)
-                        .header(
-                                "Cookie",
-                                cookie
-                        )
-                        .userAgent(
-                                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                                        + "AppleWebKit/537.36 "
-                                        + "(KHTML, like Gecko) "
-                                        + "Chrome/154.0.0.0 Safari/537.36"
-                        )
-                        .timeout(20_000)
-                        .followRedirects(true)
-                        .get();
+            Document document =
+                    fetchIUHPage();
 
-        /*
-         * Kiểm tra cookie/session.
-         */
-        if (isLoginPage(doc)) {
+            // -------------------------------------------------
+            // Kiểm tra cookie hết hạn
+            // -------------------------------------------------
 
-            handleCookieExpired();
+            if (isLoginPage(document)) {
 
-            return;
-        }
+                handleCookieExpired();
 
-        /*
-         * Parse activity.
-         */
-        Map<String, Activity> currentActivities =
-                parseActivities(doc);
+                return;
+            }
 
-        if (currentActivities.isEmpty()) {
+            // Cookie hợp lệ
+            cookieExpiredNotified = false;
 
-            System.err.println(
-                    "⚠️ Không tìm thấy hoạt động."
+            // -------------------------------------------------
+            // Parse activities
+            // -------------------------------------------------
+
+            List<Activity> currentActivities =
+                    parseActivities(document);
+
+            System.out.println(
+                    "📋 Tìm thấy " +
+                            currentActivities.size() +
+                            " hoạt động."
             );
 
-            return;
-        }
+            // -------------------------------------------------
+            // Load state cũ
+            // -------------------------------------------------
 
-        System.out.println(
-                "📋 Tìm thấy "
-                        + currentActivities.size()
-                        + " hoạt động."
-        );
+            Map<String, Activity> oldActivities =
+                    loadActivities();
 
-        /*
-         * Load trạng thái cũ.
-         */
-        Map<String, Activity> oldActivities =
-                loadActivities();
+            // -------------------------------------------------
+            // First run
+            // -------------------------------------------------
 
-        /*
-         * =====================================================
-         * FIRST RUN
-         * =====================================================
-         *
-         * Không gửi Telegram.
-         * Chỉ lưu baseline.
-         */
-        if (!Files.exists(ACTIVITIES_FILE)) {
+            if (oldActivities.isEmpty() &&
+                    !Files.exists(ACTIVITIES_FILE)) {
+
+                saveActivities(currentActivities);
+
+                System.out.println(
+                        "📝 Lần chạy đầu tiên → " +
+                                "lưu dữ liệu hiện tại, " +
+                                "không gửi thông báo."
+                );
+
+                return;
+            }
+
+            // -------------------------------------------------
+            // Find new activities
+            // -------------------------------------------------
+
+            List<Activity> newActivities =
+                    new ArrayList<>();
+
+            for (Activity current :
+                    currentActivities) {
+
+                if (!oldActivities.containsKey(
+                        current.id
+                )) {
+
+                    newActivities.add(current);
+                }
+            }
+
+            // -------------------------------------------------
+            // Send notification
+            // -------------------------------------------------
+
+            if (!newActivities.isEmpty()) {
+
+                System.out.println(
+                        "🆕 Phát hiện " +
+                                newActivities.size() +
+                                " hoạt động mới."
+                );
+
+                sendNewActivityNotification(
+                        newActivities
+                );
+
+            } else {
+
+                System.out.println(
+                        "✓ Không có hoạt động mới."
+                );
+            }
+
+            // -------------------------------------------------
+            // Save latest state
+            // -------------------------------------------------
 
             saveActivities(currentActivities);
 
-            System.out.println(
-                    "📌 Đã lưu baseline "
-                            + currentActivities.size()
-                            + " hoạt động."
+        } catch (Exception e) {
+
+            System.err.println(
+                    "❌ Lỗi khi check IUH: " +
+                            e.getMessage()
             );
+        }
+    }
+
+    // =========================================================
+    // FETCH IUH
+    // =========================================================
+
+    private static Document fetchIUHPage()
+            throws IOException {
+
+        Connection connection =
+                Jsoup.connect(IUH_URL)
+                        .method(Connection.Method.GET)
+                        .timeout(20_000)
+                        .followRedirects(true)
+                        .userAgent(
+                                "Mozilla/5.0 " +
+                                        "(Windows NT 10.0; Win64; x64) " +
+                                        "AppleWebKit/537.36 " +
+                                        "(KHTML, like Gecko) " +
+                                        "Chrome/154.0.0.0 Safari/537.36"
+                        );
+
+        connection.header(
+                "Cookie",
+                currentCookie
+        );
+
+        connection.header(
+                "Accept",
+                "text/html,application/xhtml+xml"
+        );
+
+        return connection.get();
+    }
+
+    // =========================================================
+    // LOGIN PAGE DETECTION
+    // =========================================================
+
+    private static boolean isLoginPage(
+            Document document
+    ) {
+
+        // Meta refresh
+        if (!document.select(
+                "meta[http-equiv=refresh]"
+        ).isEmpty()) {
+
+            return true;
+        }
+
+        // Password input
+        if (!document.select(
+                "input[type=password]"
+        ).isEmpty()) {
+
+            return true;
+        }
+
+        // Title
+        String title =
+                document.title()
+                        .toLowerCase();
+
+        if (title.contains("đăng nhập") ||
+                title.contains("login")) {
+
+            return true;
+        }
+
+        // Body text
+        String body =
+                document.body()
+                        .text()
+                        .toLowerCase();
+
+        return body.contains("đăng nhập") &&
+                (
+                        body.contains("mật khẩu") ||
+                                body.contains("password")
+                );
+    }
+
+    // =========================================================
+    // COOKIE EXPIRED
+    // =========================================================
+
+    private static void handleCookieExpired() {
+
+        System.out.println(
+                "❌ Cookie IUH đã hết hạn."
+        );
+
+        if (cookieExpiredNotified) {
 
             return;
         }
 
-        /*
-         * Danh sách hoạt động mới.
-         */
-        List<Activity> newActivities =
-                new ArrayList<>();
+        cookieExpiredNotified = true;
 
-        /*
-         * =====================================================
-         * DETECT NEW ACTIVITY
-         * =====================================================
-         */
-        for (Activity current :
-                currentActivities.values()) {
+        String message =
+                """
+                ⚠️ IUH EVENT MONITOR
+                
+                🍪 Cookie IUH đã hết hạn.
+                
+                Vui lòng gửi cookie mới:
+                /cookie YOUR_COOKIE
+                """;
 
-            Activity old =
-                    oldActivities.get(current.id);
+        try {
 
-            /*
-             * Chỉ có activity mới mới được notify.
-             */
-            if (old == null) {
+            sendTelegramMessage(message);
 
-                System.out.println(
-                        "🆕 Activity mới: "
-                                + current.name
-                );
+        } catch (Exception e) {
 
-                /*
-                 * QUAN TRỌNG:
-                 *
-                 * Không kiểm tra remainingSlots ở đây.
-                 *
-                 * Dù:
-                 *
-                 * 400/400
-                 *
-                 * vẫn notify.
-                 */
-                newActivities.add(current);
-            }
-        }
-
-        /*
-         * =====================================================
-         * SEND TELEGRAM
-         * =====================================================
-         */
-        if (!newActivities.isEmpty()) {
-
-            sendTelegram(newActivities);
-
-        } else {
-
-            System.out.println(
-                    "✓ Không có hoạt động mới."
+            System.err.println(
+                    "❌ Không gửi được cảnh báo cookie: " +
+                            e.getMessage()
             );
         }
-
-        /*
-         * Cập nhật baseline.
-         */
-        saveActivities(currentActivities);
     }
-
 
     // =========================================================
     // PARSE ACTIVITIES
     // =========================================================
 
-    /**
-     * Parse danh sách hoạt động từ HTML IUH.
-     */
-    private static Map<String, Activity> parseActivities(
-            Document doc) {
+    private static List<Activity> parseActivities(
+            Document document
+    ) {
 
-        Map<String, Activity> activities =
-                new LinkedHashMap<>();
+        List<Activity> activities =
+                new ArrayList<>();
 
-        /*
-         * Tìm đúng table.
-         */
-        for (Element table : doc.select("table")) {
+        Elements tables =
+                document.select("table");
 
-            String tableText =
+        for (Element table : tables) {
+
+            Elements headers =
+                    table.select("thead th");
+
+            if (headers.isEmpty()) {
+                continue;
+            }
+
+            String headerText =
                     table.text();
 
-            /*
-             * Kiểm tra đây có phải bảng hoạt động không.
-             */
-            if (!tableText.contains(
-                    "Hoạt động(T/gia)")) {
-
+            if (!headerText.contains(
+                    "Hoạt động(T/gia)"
+            )) {
                 continue;
             }
 
-            if (!tableText.contains(
-                    "Kết thúc đăng ký")) {
-
+            if (!headerText.contains(
+                    "Kết thúc đăng ký"
+            )) {
                 continue;
             }
 
-            /*
-             * Duyệt các row.
-             *
-             * Dùng tbody tr thay vì tbody > tr
-             * vì HTML IUH có modal xen giữa các row.
-             */
-            for (Element row :
-                    table.select("tbody tr")) {
+            Elements rows =
+                    table.select("tbody tr");
 
-                Elements cells =
-                        row.select("> td");
+            for (Element row : rows) {
 
-                /*
-                 * Cấu trúc:
-                 *
-                 * 0 = TT
-                 * 1 = Hoạt động
-                 * 2 = Học kỳ
-                 * 3 = Điểm
-                 * 4 = Kết thúc đăng ký
-                 * 5 = Đăng ký
-                 */
-                if (cells.size() < 6) {
-                    continue;
-                }
+                try {
 
-                /*
-                 * =================================================
-                 * NAME
-                 * =================================================
-                 */
-                Element activityCell =
-                        cells.get(1);
+                    Activity activity =
+                            parseActivity(
+                                    row,
+                                    document
+                            );
 
-                Element activityLink =
-                        activityCell.selectFirst("a");
+                    if (activity != null) {
 
-                if (activityLink == null) {
-                    continue;
-                }
+                        activities.add(activity);
+                    }
 
-                String rawName =
-                        activityLink.text().trim();
-
-                if (rawName.isBlank()) {
-                    continue;
-                }
-
-                /*
-                 * =================================================
-                 * ACTIVITY ID
-                 * =================================================
-                 *
-                 * data-target="#myModal_4160"
-                 *
-                 * => 4160
-                 */
-                String target =
-                        activityLink.attr(
-                                "data-target"
-                        );
-
-                String activityId =
-                        extractActivityId(target);
-
-                if (activityId == null) {
+                } catch (Exception e) {
 
                     System.err.println(
-                            "⚠️ Không lấy được ID: "
-                                    + rawName
+                            "⚠️ Không thể parse activity: " +
+                                    e.getMessage()
                     );
-
-                    continue;
                 }
-
-                /*
-                 * =================================================
-                 * SLOT
-                 * =================================================
-                 */
-                SlotInfo slotInfo =
-                        parseSlot(rawName);
-
-                /*
-                 * Xóa "(400/400)" khỏi tên.
-                 */
-                String cleanName =
-                        cleanActivityName(rawName);
-
-                /*
-                 * =================================================
-                 * SEMESTER
-                 * =================================================
-                 */
-                String semester =
-                        cells.get(2)
-                                .text()
-                                .trim();
-
-                /*
-                 * =================================================
-                 * POINTS
-                 * =================================================
-                 */
-                String points =
-                        cells.get(3)
-                                .text()
-                                .trim();
-
-                /*
-                 * =================================================
-                 * END DATE
-                 * =================================================
-                 */
-                String endDate =
-                        cells.get(4)
-                                .text()
-                                .trim();
-
-                /*
-                 * =================================================
-                 * REGISTER STATUS
-                 * =================================================
-                 */
-                String registerStatus =
-                        cells.get(5)
-                                .text()
-                                .trim();
-
-                /*
-                 * =================================================
-                 * CAN REGISTER
-                 * =================================================
-                 */
-                boolean canRegister =
-                        slotInfo.remainingSlots > 0
-                                && !registerStatus
-                                .toLowerCase()
-                                .contains("đã đủ");
-
-                /*
-                 * =================================================
-                 * DETAIL
-                 * =================================================
-                 */
-                String detail =
-                        parseDetail(
-                                doc,
-                                activityId
-                        );
-
-                /*
-                 * =================================================
-                 * REGISTER URL
-                 * =================================================
-                 */
-                String registerUrl =
-                        parseRegisterUrl(
-                                cells.get(5)
-                        );
-
-                /*
-                 * =================================================
-                 * CREATE ACTIVITY
-                 * =================================================
-                 */
-                Activity activity =
-                        new Activity(
-                                activityId,
-                                cleanName,
-                                semester,
-                                points,
-                                endDate,
-                                slotInfo.registeredSlots,
-                                slotInfo.totalSlots,
-                                slotInfo.remainingSlots,
-                                registerStatus,
-                                canRegister,
-                                detail,
-                                registerUrl
-                        );
-
-                activities.put(
-                        activityId,
-                        activity
-                );
             }
-
-            /*
-             * Đã tìm đúng table.
-             */
-            break;
         }
 
         return activities;
     }
 
-
     // =========================================================
-    // ACTIVITY ID
+    // PARSE ONE ACTIVITY
     // =========================================================
 
-    /**
-     * Lấy ID từ:
-     *
-     * #myModal_4160
-     *
-     * => 4160
-     */
-    private static String extractActivityId(
-            String target) {
+    private static Activity parseActivity(
+            Element row,
+            Document document
+    ) {
 
-        if (target == null
-                || target.isBlank()) {
+        Elements cells =
+                row.select("> td");
 
+        if (cells.size() < 6) {
             return null;
         }
 
-        String prefix =
-                "#myModal_";
+        // -----------------------------------------------------
+        // Activity link
+        // -----------------------------------------------------
 
-        if (!target.startsWith(prefix)) {
+        Element link =
+                cells.get(1).selectFirst("a");
+
+        if (link == null) {
             return null;
         }
 
-        return target.substring(
-                prefix.length()
+        String rawName =
+                link.text().trim();
+
+        // -----------------------------------------------------
+        // ID
+        // -----------------------------------------------------
+
+        String target =
+                link.attr("data-target");
+
+        String id =
+                extractActivityId(target);
+
+        if (id.isBlank()) {
+
+            id = rawName;
+        }
+
+        // -----------------------------------------------------
+        // Slot
+        // -----------------------------------------------------
+
+        SlotInfo slotInfo =
+                parseSlot(rawName);
+
+        String cleanName =
+                cleanActivityName(rawName);
+
+        // -----------------------------------------------------
+        // Semester
+        // -----------------------------------------------------
+
+        String semester =
+                cells.get(2).text().trim();
+
+        // -----------------------------------------------------
+        // Points
+        // -----------------------------------------------------
+
+        String points =
+                cells.get(3).text().trim();
+
+        // -----------------------------------------------------
+        // End date
+        // -----------------------------------------------------
+
+        String endDate =
+                cells.get(4).text().trim();
+
+        // -----------------------------------------------------
+        // Register status
+        // -----------------------------------------------------
+
+        String registerStatus =
+                cells.get(5).text().trim();
+
+        boolean canRegister =
+                slotInfo.remainingSlots > 0;
+
+        // -----------------------------------------------------
+        // Detail
+        // -----------------------------------------------------
+
+        String detail =
+                parseDetail(
+                        document,
+                        target
+                );
+
+        return new Activity(
+                id,
+                cleanName,
+                semester,
+                points,
+                endDate,
+                slotInfo.registeredSlots,
+                slotInfo.totalSlots,
+                slotInfo.remainingSlots,
+                registerStatus,
+                canRegister,
+                detail
         );
     }
 
-
     // =========================================================
-    // SLOT
+    // EXTRACT ID
     // =========================================================
 
-    /**
-     * Parse:
-     *
-     * Event ABC (400/400)
-     *
-     * registered = 400
-     * total      = 400
-     * remaining  = 0
-     */
-    private static SlotInfo parseSlot(
-            String name) {
+    private static String extractActivityId(
+            String target
+    ) {
 
-        int open =
-                name.lastIndexOf("(");
+        if (target == null ||
+                target.isBlank()) {
 
-        int close =
-                name.lastIndexOf(")");
-
-        if (open == -1
-                || close == -1
-                || close <= open) {
-
-            return new SlotInfo(
-                    0,
-                    0,
-                    0
-            );
+            return "";
         }
 
-        String slotText =
-                name.substring(
-                        open + 1,
-                        close
-                ).trim();
+        Pattern pattern =
+                Pattern.compile(
+                        "#myModal_(\\d+)"
+                );
 
-        String[] parts =
-                slotText.split("/");
+        Matcher matcher =
+                pattern.matcher(target);
 
-        if (parts.length != 2) {
+        if (matcher.find()) {
 
-            return new SlotInfo(
-                    0,
-                    0,
-                    0
-            );
+            return matcher.group(1);
         }
 
-        try {
-
-            int registered =
-                    Integer.parseInt(
-                            parts[0].trim()
-                    );
-
-            int total =
-                    Integer.parseInt(
-                            parts[1].trim()
-                    );
-
-            int remaining =
-                    Math.max(
-                            total - registered,
-                            0
-                    );
-
-            return new SlotInfo(
-                    registered,
-                    total,
-                    remaining
-            );
-
-        } catch (NumberFormatException e) {
-
-            return new SlotInfo(
-                    0,
-                    0,
-                    0
-            );
-        }
+        return "";
     }
 
+    // =========================================================
+    // PARSE SLOT
+    // =========================================================
 
-    /**
-     * Xóa "(400/400)" khỏi tên.
-     */
+    private static SlotInfo parseSlot(
+            String text
+    ) {
+
+        Pattern pattern =
+                Pattern.compile(
+                        "\\((\\d+)\\s*/\\s*(\\d+)\\)"
+                );
+
+        Matcher matcher =
+                pattern.matcher(text);
+
+        if (!matcher.find()) {
+
+            return new SlotInfo(
+                    0,
+                    0,
+                    0
+            );
+        }
+
+        int registered =
+                Integer.parseInt(
+                        matcher.group(1)
+                );
+
+        int total =
+                Integer.parseInt(
+                        matcher.group(2)
+                );
+
+        int remaining =
+                Math.max(
+                        total - registered,
+                        0
+                );
+
+        return new SlotInfo(
+                registered,
+                total,
+                remaining
+        );
+    }
+
+    // =========================================================
+    // CLEAN ACTIVITY NAME
+    // =========================================================
+
     private static String cleanActivityName(
-            String name) {
+            String rawName
+    ) {
 
-        return name
-                .replaceFirst(
+        return rawName
+                .replaceAll(
                         "\\s*\\(\\d+\\s*/\\s*\\d+\\)\\s*$",
                         ""
                 )
                 .trim();
     }
 
-
     // =========================================================
-    // DETAIL
+    // PARSE DETAIL
     // =========================================================
 
-    /**
-     * Lấy thông tin từ modal.
-     *
-     * Ví dụ:
-     *
-     * #myModal_4160
-     */
     private static String parseDetail(
-            Document doc,
-            String activityId) {
+            Document document,
+            String target
+    ) {
+
+        if (target == null ||
+                target.isBlank()) {
+
+            return "";
+        }
 
         Element modal =
-                doc.selectFirst(
-                        "#myModal_" + activityId
-                );
+                document.selectFirst(target);
 
         if (modal == null) {
+
             return "";
         }
 
@@ -821,456 +819,293 @@ public class Main {
                 );
 
         if (body == null) {
+
             return "";
         }
 
-        /*
-         * Giữ <br> thành xuống dòng.
-         */
-        String detail =
-                body.html()
-                        .replaceAll(
-                                "(?i)<br\\s*/?>",
-                                "\n"
-                        )
-                        .replaceAll(
-                                "<[^>]*>",
-                                ""
-                        )
-                        .replace(
-                                "&nbsp;",
-                                " "
+        // Convert <br> thành newline
+        for (Element br :
+                body.select("br")) {
+
+            br.after("\\n");
+        }
+
+        String text =
+                body.text();
+
+        return text
+                .replace("\\n", "\n")
+                .replaceAll(
+                        "\\n\\s*\\n+",
+                        "\n"
+                )
+                .trim();
+    }
+
+    // =========================================================
+    // EXTRACT TIME
+    // =========================================================
+
+    private static String extractTime(
+            String detail
+    ) {
+
+        if (detail == null ||
+                detail.isBlank()) {
+
+            return "";
+        }
+
+        for (String line :
+                detail.split("\\R")) {
+
+            String cleaned =
+                    line.trim();
+
+            if (cleaned.startsWith(
+                    "- Thời gian:"
+            )) {
+
+                return cleaned
+                        .substring(
+                                "- Thời gian:"
+                                        .length()
                         )
                         .trim();
+            }
 
-        return detail;
-    }
+            if (cleaned.startsWith(
+                    "Thời gian:"
+            )) {
 
-
-    // =========================================================
-    // REGISTER URL
-    // =========================================================
-
-    private static String parseRegisterUrl(
-            Element registerCell) {
-
-        Element link =
-                registerCell.selectFirst(
-                        "a[href]"
-                );
-
-        if (link == null) {
-            return "";
-        }
-
-        String href =
-                link.attr("href")
+                return cleaned
+                        .substring(
+                                "Thời gian:"
+                                        .length()
+                        )
                         .trim();
-
-        if (href.isBlank()
-                || href.equals("#")) {
-
-            return "";
-        }
-
-        try {
-
-            return URI.create(IUH_URL)
-                    .resolve(href)
-                    .toString();
-
-        } catch (Exception e) {
-
-            return href;
-        }
-    }
-
-
-    // =========================================================
-    // LOGIN / COOKIE EXPIRED
-    // =========================================================
-
-    /**
-     * Kiểm tra IUH có trả về trang login không.
-     */
-    private static boolean isLoginPage(
-            Document doc) {
-
-        /*
-         * Meta refresh.
-         */
-        String refresh =
-                doc.select(
-                        "meta[http-equiv=refresh]"
-                ).attr("content");
-
-        if (refresh != null
-                && refresh
-                .toLowerCase()
-                .contains("login")) {
-
-            return true;
-        }
-
-        /*
-         * Title.
-         */
-        String title =
-                doc.title()
-                        .toLowerCase();
-
-        if (title.contains("login")
-                || title.contains("đăng nhập")) {
-
-            return true;
-        }
-
-        /*
-         * Kiểm tra form login.
-         */
-        Element passwordInput =
-                doc.selectFirst(
-                        "input[type=password]"
-                );
-
-        if (passwordInput != null) {
-            return true;
-        }
-
-        /*
-         * Một số trường hợp IUH có text đăng nhập
-         * nhưng title không đổi.
-         */
-        String bodyText =
-                doc.body() != null
-                        ? doc.body().text()
-                        : "";
-
-        String lowerBody =
-                bodyText.toLowerCase();
-
-        return lowerBody.contains("đăng nhập")
-                && lowerBody.contains("mật khẩu");
-    }
-
-
-    /**
-     * Xử lý cookie hết hạn.
-     */
-    private static void handleCookieExpired()
-            throws Exception {
-
-        System.err.println(
-                "🍪❌ Cookie IUH đã hết hạn."
-        );
-
-        /*
-         * Không spam Telegram.
-         */
-        if (cookieExpiredNotified) {
-            return;
-        }
-
-        cookieExpiredNotified = true;
-
-        sendTelegramMessage(
-                "🍪❌ COOKIE IUH ĐÃ HẾT HẠN!\n\n"
-                        + "Hãy gửi cookie mới cho bot bằng:\n"
-                        + "/cookie YOUR_COOKIE"
-        );
-    }
-
-
-    // =========================================================
-    // LOAD ACTIVITIES
-    // =========================================================
-
-    private static Map<String, Activity>
-    loadActivities()
-            throws IOException {
-
-        Map<String, Activity> result =
-                new LinkedHashMap<>();
-
-        if (!Files.exists(ACTIVITIES_FILE)) {
-            return result;
-        }
-
-        List<String> lines =
-                Files.readAllLines(
-                        ACTIVITIES_FILE,
-                        StandardCharsets.UTF_8
-                );
-
-        for (String line : lines) {
-
-            if (line.isBlank()) {
-                continue;
-            }
-
-            String[] parts =
-                    line.split(
-                            "\\|",
-                            -1
-                    );
-
-            /*
-             * Format:
-             *
-             * 0  ID
-             * 1  name
-             * 2  semester
-             * 3  points
-             * 4  endDate
-             * 5  registered
-             * 6  total
-             * 7  remaining
-             * 8  status
-             * 9  canRegister
-             * 10 detail
-             * 11 registerUrl
-             */
-            if (parts.length < 12) {
-                continue;
-            }
-
-            try {
-
-                Activity activity =
-                        new Activity(
-                                parts[0],
-                                parts[1],
-                                parts[2],
-                                parts[3],
-                                parts[4],
-                                Integer.parseInt(parts[5]),
-                                Integer.parseInt(parts[6]),
-                                Integer.parseInt(parts[7]),
-                                parts[8],
-                                Boolean.parseBoolean(
-                                        parts[9]
-                                ),
-                                parts[10].replace(
-                                        "\\n",
-                                        "\n"
-                                ),
-                                parts[11]
-                        );
-
-                result.put(
-                        activity.id,
-                        activity
-                );
-
-            } catch (Exception e) {
-
-                System.err.println(
-                        "⚠️ Không thể đọc activity: "
-                                + line
-                );
-            }
-        }
-
-        return result;
-    }
-
-
-    // =========================================================
-    // SAVE ACTIVITIES
-    // =========================================================
-
-    private static void saveActivities(
-            Map<String, Activity> activities)
-            throws IOException {
-
-        List<String> lines =
-                new ArrayList<>();
-
-        for (Activity activity :
-                activities.values()) {
-
-            String name =
-                    sanitize(
-                            activity.name
-                    );
-
-            String semester =
-                    sanitize(
-                            activity.semester
-                    );
-
-            String points =
-                    sanitize(
-                            activity.points
-                    );
-
-            String endDate =
-                    sanitize(
-                            activity.endDate
-                    );
-
-            String status =
-                    sanitize(
-                            activity.registerStatus
-                    );
-
-            String detail =
-                    activity.detail
-                            .replace(
-                                    "\n",
-                                    "\\n"
-                            )
-                            .replace(
-                                    "|",
-                                    "/"
-                            );
-
-            String registerUrl =
-                    sanitize(
-                            activity.registerUrl
-                    );
-
-            String line =
-                    String.join(
-                            "|",
-                            activity.id,
-                            name,
-                            semester,
-                            points,
-                            endDate,
-                            String.valueOf(
-                                    activity.registeredSlots
-                            ),
-                            String.valueOf(
-                                    activity.totalSlots
-                            ),
-                            String.valueOf(
-                                    activity.remainingSlots
-                            ),
-                            status,
-                            String.valueOf(
-                                    activity.canRegister
-                            ),
-                            detail,
-                            registerUrl
-                    );
-
-            lines.add(line);
-        }
-
-        Files.write(
-                ACTIVITIES_FILE,
-                lines,
-                StandardCharsets.UTF_8,
-                StandardOpenOption.CREATE,
-                StandardOpenOption.TRUNCATE_EXISTING
-        );
-    }
-
-
-    /**
-     * Loại ký tự làm hỏng format file.
-     */
-    private static String sanitize(
-            String value) {
-
-        if (value == null) {
-            return "";
-        }
-
-        return value
-                .replace(
-                        "|",
-                        "/"
-                )
-                .replace(
-                        "\r",
-                        " "
-                )
-                .replace(
-                        "\n",
-                        " "
-                );
-    }
-
-    private static String extractTime(String detail) {
-        if (detail == null || detail.isBlank()) {
-            return "";
-        }
-
-        for (String line : detail.split("\\R")) {
-            String cleaned = line.trim();
-
-            if (cleaned.startsWith("- Thời gian:")) {
-                return cleaned.substring("- Thời gian:".length()).trim();
-            }
-
-            if (cleaned.startsWith("Thời gian:")) {
-                return cleaned.substring("Thời gian:".length()).trim();
             }
         }
 
         return "";
     }
 
-
     // =========================================================
-    // TELEGRAM SEND
+    // LOAD ACTIVITIES
     // =========================================================
 
-    /**
-     * Gửi danh sách activity mới.
-     */
-    private static void sendTelegram(List<Activity> activities) throws Exception {
-        StringBuilder message = new StringBuilder();
+    private static Map<String, Activity>
+    loadActivities() {
 
-        message.append("🆕 IUH CÓ HOẠT ĐỘNG MỚI!\n");
+        Map<String, Activity> activities =
+                new HashMap<>();
 
-        for (Activity activity : activities) {
-            message.append("\n");
+        if (!Files.exists(ACTIVITIES_FILE)) {
 
-            message.append("📌 ").append(activity.name).append("\n");
+            return activities;
+        }
 
-            if (activity.remainingSlots > 0) {
-                message.append("🟢 CÒN SLOT\n");
-            } else {
-                message.append("🔴 HẾT SLOT\n");
+        try {
+
+            List<String> lines =
+                    Files.readAllLines(
+                            ACTIVITIES_FILE,
+                            StandardCharsets.UTF_8
+                    );
+
+            for (String line : lines) {
+
+                if (line.isBlank()) {
+                    continue;
+                }
+
+                Activity activity =
+                        Activity.fromLine(line);
+
+                if (activity != null) {
+
+                    activities.put(
+                            activity.id,
+                            activity
+                    );
+                }
             }
 
-            message.append("⭐️ Điểm: ").append(activity.points).append("\n");
+        } catch (Exception e) {
+
+            System.err.println(
+                    "❌ Không thể load activities.txt: " +
+                            e.getMessage()
+            );
+        }
+
+        return activities;
+    }
+
+    // =========================================================
+    // SAVE ACTIVITIES
+    // =========================================================
+
+    private static synchronized void saveActivities(
+            List<Activity> activities
+    ) {
+
+        try {
+
+            List<String> lines =
+                    new ArrayList<>();
+
+            for (Activity activity :
+                    activities) {
+
+                lines.add(
+                        activity.toLine()
+                );
+            }
+
+            Files.write(
+                    ACTIVITIES_FILE,
+                    lines,
+                    StandardCharsets.UTF_8
+            );
+
+        } catch (Exception e) {
+
+            System.err.println(
+                    "❌ Không thể lưu activities.txt: " +
+                            e.getMessage()
+            );
+        }
+    }
+
+    // =========================================================
+    // TELEGRAM - NEW ACTIVITY
+    // =========================================================
+
+    private static void sendNewActivityNotification(
+            List<Activity> activities
+    ) throws Exception {
+
+        StringBuilder message =
+                new StringBuilder();
+
+        message.append(
+                "🆕 IUH CÓ HOẠT ĐỘNG MỚI!\n"
+        );
+
+        for (Activity activity :
+                activities) {
+
+            message.append("\n");
+
+            // Tên hoạt động
+            message.append("📌 ")
+                    .append(activity.name)
+                    .append("\n");
+
+            // Slot
+            if (activity.remainingSlots > 0) {
+
+                message.append(
+                        "🟢 CÒN SLOT\n"
+                );
+
+            } else {
+
+                message.append(
+                        "🔴 HẾT SLOT\n"
+                );
+            }
+
+            // Điểm
+            message.append("⭐️ Điểm: ")
+                    .append(activity.points)
+                    .append("\n");
+
+            // Slot registered / total
             message.append("👥 Slot: ")
                     .append(activity.registeredSlots)
                     .append("/")
                     .append(activity.totalSlots)
                     .append("\n");
 
-            message.append("📌 Trạng thái: ")
+            // Trạng thái
+            message.append(
+                            "📌 Trạng thái: "
+                    )
                     .append(activity.registerStatus)
                     .append("\n");
 
-            message.append("⏰ Kết thúc đăng ký: ")
+            // Deadline
+            message.append(
+                            "⏰ Kết thúc đăng ký: "
+                    )
                     .append(activity.endDate)
                     .append("\n");
 
-            String time = extractTime(activity.detail);
+            // Chỉ lấy thời gian
+            String time =
+                    extractTime(
+                            activity.detail
+                    );
 
             if (!time.isBlank()) {
-                message.append("📋 Thời gian: ")
+
+                message.append(
+                                "📋 Thời gian: "
+                        )
                         .append(time)
                         .append("\n");
             }
         }
 
-        sendTelegramMessage(message.toString());
+        sendTelegramMessage(
+                message.toString()
+        );
     }
 
+    // =========================================================
+    // TELEGRAM - HEARTBEAT
+    // =========================================================
 
-    /**
-     * Gửi một message Telegram.
-     */
+    private static void sendHeartbeat() {
+
+        try {
+
+            String currentTime =
+                    LocalDateTime.now()
+                            .format(TIME_FORMATTER);
+
+            String message =
+                    """
+                    💚 IUH EVENT MONITOR ĐANG HOẠT ĐỘNG
+                    
+                    ⏱ Thời gian: %s
+                    📋 Kiểm tra IUH: mỗi 30 giây
+                    """.formatted(currentTime);
+
+            sendTelegramMessage(message);
+
+            System.out.println(
+                    "💚 Heartbeat đã gửi Telegram."
+            );
+
+        } catch (Exception e) {
+
+            System.err.println(
+                    "❌ Không gửi được heartbeat: " +
+                            e.getMessage()
+            );
+        }
+    }
+
+    // =========================================================
+    // TELEGRAM - SEND MESSAGE
+    // =========================================================
+
     private static void sendTelegramMessage(
-            String message)
-            throws Exception {
+            String message
+    ) throws Exception {
 
         String botToken =
                 System.getenv(
@@ -1282,190 +1117,140 @@ public class Main {
                         ENV_CHAT_ID
                 );
 
-        if (botToken == null
-                || botToken.isBlank()) {
+        if (botToken == null ||
+                botToken.isBlank()) {
 
             throw new IllegalStateException(
-                    "Thiếu TELEGRAM_BOT_TOKEN"
+                    "Chưa cấu hình " +
+                            ENV_BOT_TOKEN
             );
         }
 
-        if (chatId == null
-                || chatId.isBlank()) {
+        if (chatId == null ||
+                chatId.isBlank()) {
 
             throw new IllegalStateException(
-                    "Thiếu TELEGRAM_CHAT_ID"
+                    "Chưa cấu hình " +
+                            ENV_CHAT_ID
             );
         }
 
-        String encodedMessage =
-                URLEncoder.encode(
-                        message,
-                        StandardCharsets.UTF_8
-                );
-
-        String encodedChatId =
-                URLEncoder.encode(
-                        chatId,
-                        StandardCharsets.UTF_8
-                );
-
-        String telegramUrl =
-                "https://api.telegram.org/bot"
-                        + botToken
-                        + "/sendMessage"
-                        + "?chat_id="
-                        + encodedChatId
-                        + "&text="
-                        + encodedMessage;
+        String url =
+                "https://api.telegram.org/bot" +
+                        botToken +
+                        "/sendMessage" +
+                        "?chat_id=" +
+                        URLEncoder.encode(
+                                chatId,
+                                StandardCharsets.UTF_8
+                        ) +
+                        "&text=" +
+                        URLEncoder.encode(
+                                message,
+                                StandardCharsets.UTF_8
+                        );
 
         HttpRequest request =
                 HttpRequest.newBuilder()
-                        .uri(
-                                URI.create(
-                                        telegramUrl
-                                )
-                        )
-                        .timeout(
-                                Duration.ofSeconds(10)
-                        )
+                        .uri(URI.create(url))
                         .GET()
                         .build();
 
         HttpResponse<String> response =
                 HTTP_CLIENT.send(
                         request,
-                        HttpResponse.BodyHandlers
-                                .ofString()
+                        HttpResponse.BodyHandlers.ofString()
                 );
 
         if (response.statusCode() != 200) {
 
-            throw new IllegalStateException(
-                    "Telegram API lỗi: HTTP "
-                            + response.statusCode()
-                            + "\n"
-                            + response.body()
+            throw new IOException(
+                    "Telegram HTTP " +
+                            response.statusCode() +
+                            ": " +
+                            response.body()
             );
         }
-
-        System.out.println(
-                "✅ Đã gửi Telegram."
-        );
     }
 
-
     // =========================================================
-    // TELEGRAM RECEIVE
+    // TELEGRAM - POLLING
     // =========================================================
 
-    /**
-     * Lấy message mới từ Telegram.
-     */
-    private static void checkTelegramMessages()
-            throws Exception {
+    private static void checkTelegramMessages() {
 
         String botToken =
                 System.getenv(
                         ENV_BOT_TOKEN
                 );
 
-        String allowedChatId =
-                System.getenv(
-                        ENV_CHAT_ID
-                );
-
-        if (botToken == null
-                || botToken.isBlank()) {
+        if (botToken == null ||
+                botToken.isBlank()) {
 
             return;
         }
 
-        if (allowedChatId == null
-                || allowedChatId.isBlank()) {
+        try {
 
-            return;
-        }
+            long offset =
+                    loadTelegramOffset();
 
-        long offset =
-                loadTelegramOffset();
+            String url =
+                    "https://api.telegram.org/bot" +
+                            botToken +
+                            "/getUpdates" +
+                            "?timeout=0" +
+                            "&offset=" +
+                            (offset + 1);
 
-        String url =
-                "https://api.telegram.org/bot"
-                        + botToken
-                        + "/getUpdates"
-                        + "?timeout=0"
-                        + "&offset="
-                        + (offset + 1);
+            HttpRequest request =
+                    HttpRequest.newBuilder()
+                            .uri(URI.create(url))
+                            .GET()
+                            .build();
 
-        HttpRequest request =
-                HttpRequest.newBuilder()
-                        .uri(
-                                URI.create(url)
-                        )
-                        .timeout(
-                                Duration.ofSeconds(10)
-                        )
-                        .GET()
-                        .build();
+            HttpResponse<String> response =
+                    HTTP_CLIENT.send(
+                            request,
+                            HttpResponse.BodyHandlers.ofString()
+                    );
 
-        HttpResponse<String> response =
-                HTTP_CLIENT.send(
-                        request,
-                        HttpResponse.BodyHandlers
-                                .ofString()
+            if (response.statusCode() != 200) {
+
+                System.err.println(
+                        "❌ Telegram getUpdates HTTP " +
+                                response.statusCode()
                 );
 
-        if (response.statusCode() != 200) {
+                return;
+            }
 
-            System.err.println(
-                    "❌ Telegram getUpdates lỗi: "
-                            + response.statusCode()
+            processTelegramJson(
+                    response.body()
             );
 
-            return;
+        } catch (Exception e) {
+
+            System.err.println(
+                    "❌ Telegram polling lỗi: " +
+                            e.getMessage()
+            );
         }
-
-        processTelegramJson(
-                response.body(),
-                allowedChatId
-        );
     }
-
 
     // =========================================================
     // TELEGRAM JSON PARSER
     // =========================================================
 
-    /**
-     * Parse Telegram JSON.
-     *
-     * Không dùng thêm JSON dependency.
-     */
     private static void processTelegramJson(
-            String json,
-            String allowedChatId)
-            throws Exception {
+            String json
+    ) {
 
-        if (json == null
-                || json.isBlank()) {
+        if (json == null ||
+                json.isBlank()) {
 
             return;
         }
-
-        /*
-         * Telegram trả:
-         *
-         * {
-         *   "ok":true,
-         *   "result":[
-         *      {
-         *          "update_id":123,
-         *          ...
-         *      }
-         *   ]
-         * }
-         */
 
         Pattern updatePattern =
                 Pattern.compile(
@@ -1475,307 +1260,380 @@ public class Main {
         Matcher updateMatcher =
                 updatePattern.matcher(json);
 
-        List<Integer> updatePositions =
-                new ArrayList<>();
-
-        List<Long> updateIds =
-                new ArrayList<>();
-
         while (updateMatcher.find()) {
 
-            updatePositions.add(
-                    updateMatcher.start()
-            );
-
-            updateIds.add(
+            long updateId =
                     Long.parseLong(
                             updateMatcher.group(1)
-                    )
-            );
-        }
-
-        if (updateIds.isEmpty()) {
-            return;
-        }
-
-        for (int i = 0;
-             i < updateIds.size();
-             i++) {
-
-            long updateId =
-                    updateIds.get(i);
+                    );
 
             int start =
-                    updatePositions.get(i);
+                    updateMatcher.start();
 
-            int end;
+            int nextStart;
 
-            if (i + 1 < updatePositions.size()) {
+            if (updateMatcher.find()) {
 
-                end =
-                        updatePositions.get(
-                                i + 1
+                nextStart =
+                        updateMatcher.start();
+
+                updateMatcher.reset();
+
+                // Không dùng cách này vì matcher
+                // bị reset
+            }
+
+            // Tách update bằng cách tìm object tiếp theo
+            int objectStart =
+                    json.indexOf(
+                            "{",
+                            start
+                    );
+
+            int objectEnd =
+                    findNextUpdateStart(
+                            json,
+                            start
+                    );
+
+            String updateJson;
+
+            if (objectEnd > objectStart) {
+
+                updateJson =
+                        json.substring(
+                                objectStart,
+                                objectEnd
                         );
 
             } else {
 
-                end = json.length();
+                updateJson =
+                        json.substring(
+                                objectStart
+                        );
             }
-
-            String updateJson =
-                    json.substring(
-                            start,
-                            end
-                    );
 
             processSingleTelegramUpdate(
                     updateId,
-                    updateJson,
-                    allowedChatId
+                    updateJson
             );
 
-            /*
-             * Lưu offset.
-             */
-            saveTelegramOffset(
-                    updateId
+            // -------------------------------------------------
+            // Vì regex matcher ở trên đã khó xử lý next match
+            // nên thoát để dùng parser riêng bên dưới.
+            // -------------------------------------------------
+
+            break;
+        }
+
+        // Dùng parser ổn định hơn
+        processTelegramUpdatesSafely(json);
+    }
+
+    // =========================================================
+    // FIND NEXT UPDATE
+    // =========================================================
+
+    private static int findNextUpdateStart(
+            String json,
+            int currentStart
+    ) {
+
+        int next =
+                json.indexOf(
+                        "\"update_id\"",
+                        currentStart + 1
+                );
+
+        if (next < 0) {
+
+            return json.length();
+        }
+
+        int objectStart =
+                json.lastIndexOf(
+                        "{",
+                        next
+                );
+
+        if (objectStart < 0) {
+
+            return json.length();
+        }
+
+        return objectStart;
+    }
+
+    // =========================================================
+    // SAFE TELEGRAM UPDATE PARSER
+    // =========================================================
+
+    private static void processTelegramUpdatesSafely(
+            String json
+    ) {
+
+        Pattern updatePattern =
+                Pattern.compile(
+                        "\\{\\s*\"update_id\"\\s*:\\s*(\\d+)(.*?)(?=\\{\\s*\"update_id\"\\s*:|\\]\\s*\\}\\s*$)",
+                        Pattern.DOTALL
+                );
+
+        Matcher matcher =
+                updatePattern.matcher(json);
+
+        while (matcher.find()) {
+
+            long updateId =
+                    Long.parseLong(
+                            matcher.group(1)
+                    );
+
+            String updateJson =
+                    matcher.group(0);
+
+            processSingleTelegramUpdate(
+                    updateId,
+                    updateJson
             );
         }
     }
 
+    // =========================================================
+    // PROCESS TELEGRAM UPDATE
+    // =========================================================
 
-    /**
-     * Xử lý một Telegram update.
-     */
     private static void processSingleTelegramUpdate(
             long updateId,
-            String updateJson,
-            String allowedChatId)
-            throws Exception {
+            String updateJson
+    ) {
 
-        /*
-         * Lấy chat.id.
-         */
-        Pattern chatPattern =
-                Pattern.compile(
-                        "\"chat\"\\s*:\\s*\\{[^}]*?\"id\"\\s*:\\s*(-?\\d+)"
+        String configuredChatId =
+                System.getenv(
+                        ENV_CHAT_ID
                 );
 
-        Matcher chatMatcher =
-                chatPattern.matcher(updateJson);
-
-        if (!chatMatcher.find()) {
-            return;
-        }
-
-        String senderChatId =
-                chatMatcher.group(1);
-
-        /*
-         * Chỉ nhận message từ chat được phép.
-         */
-        if (!allowedChatId.equals(
-                senderChatId)) {
-
-            System.out.println(
-                    "⚠️ Bỏ qua message từ chat: "
-                            + senderChatId
-            );
+        if (configuredChatId == null ||
+                configuredChatId.isBlank()) {
 
             return;
         }
 
-        /*
-         * Lấy text.
-         */
-        Pattern textPattern =
-                Pattern.compile(
-                        "\"text\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\""
+        String chatId =
+                extractJsonValue(
+                        updateJson,
+                        "\"chat\"\\s*:\\s*\\{.*?\"id\"\\s*:\\s*(-?\\d+)"
                 );
 
-        Matcher textMatcher =
-                textPattern.matcher(updateJson);
+        if (chatId == null) {
 
-        if (!textMatcher.find()) {
+            return;
+        }
+
+        if (!configuredChatId.equals(chatId)) {
+
+            saveTelegramOffset(updateId);
+
             return;
         }
 
         String text =
-                unescapeJson(
-                        textMatcher.group(1)
+                extractJsonValue(
+                        updateJson,
+                        "\"text\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\""
                 );
 
         if (text == null) {
+
+            saveTelegramOffset(updateId);
+
             return;
         }
 
-        text = text.trim();
+        text =
+                unescapeJson(text)
+                        .trim();
 
         System.out.println(
-                "📩 Telegram: " + text
+                "📨 Telegram: " +
+                        text
         );
 
-        /*
-         * =============================================
-         * /start
-         * =============================================
-         */
+        // -----------------------------------------------------
+        // /start
+        // -----------------------------------------------------
 
         if (text.equalsIgnoreCase(
-                "/start")) {
+                "/start"
+        )) {
 
-            sendTelegramMessage(
-                    "🤖 IUH Event Monitor đang chạy.\n\n"
-                            + "Khi cookie IUH hết hạn, hãy gửi:\n"
-                            + "/cookie YOUR_COOKIE"
-            );
-
-            return;
-        }
-
-        /*
-         * =============================================
-         * /cookie
-         * =============================================
-         */
-
-        if (text.startsWith(
-                "/cookie")) {
-
-            String cookie =
-                    text.substring(
-                            "/cookie".length()
-                    ).trim();
-
-            if (cookie.isBlank()) {
+            try {
 
                 sendTelegramMessage(
-                        "❌ Cookie trống.\n\n"
-                                + "Dùng:\n"
-                                + "/cookie YOUR_COOKIE"
+                        """
+                        🤖 IUH EVENT MONITOR
+                        
+                        Tool đang hoạt động.
+                        
+                        🍪 Cập nhật cookie:
+                        /cookie YOUR_COOKIE
+                        
+                        ⏱ Check IUH: mỗi 30 giây
+                        💚 Heartbeat: mỗi 30 phút
+                        """
                 );
 
-                return;
+            } catch (Exception e) {
+
+                System.err.println(
+                        "❌ Không gửi được /start response: " +
+                                e.getMessage()
+                );
             }
-
-            /*
-             * Lưu cookie mới.
-             */
-            saveCookie(cookie);
-
-            /*
-             * Reset trạng thái expired.
-             */
-            cookieExpiredNotified = false;
-
-            sendTelegramMessage(
-                    "✅ Đã cập nhật cookie IUH.\n\n"
-                            + "Tool sẽ sử dụng cookie mới "
-                            + "ở lần kiểm tra tiếp theo."
-            );
-
-            System.out.println(
-                    "🍪 Đã nhận cookie mới từ Telegram."
-            );
         }
+
+        // -----------------------------------------------------
+        // /cookie
+        // -----------------------------------------------------
+
+        else if (text.toLowerCase()
+                .startsWith("/cookie ")) {
+
+            String newCookie =
+                    text.substring(
+                            "/cookie ".length()
+                    ).trim();
+
+            if (!newCookie.isBlank()) {
+
+                saveCookie(newCookie);
+
+                cookieExpiredNotified =
+                        false;
+
+                try {
+
+                    sendTelegramMessage(
+                            """
+                            ✅ Đã cập nhật cookie IUH.
+                            
+                            🔄 Tool sẽ tiếp tục kiểm tra IUH.
+                            ⏱ Chu kỳ kiểm tra: 30 giây.
+                            """
+                    );
+
+                } catch (Exception e) {
+
+                    System.err.println(
+                            "❌ Không gửi được xác nhận cookie: " +
+                                    e.getMessage()
+                    );
+                }
+            }
+        }
+
+        // -----------------------------------------------------
+        // Save offset
+        // -----------------------------------------------------
+
+        saveTelegramOffset(updateId);
     }
 
+    // =========================================================
+    // JSON VALUE
+    // =========================================================
+
+    private static String extractJsonValue(
+            String json,
+            String regex
+    ) {
+
+        Pattern pattern =
+                Pattern.compile(
+                        regex,
+                        Pattern.DOTALL
+                );
+
+        Matcher matcher =
+                pattern.matcher(json);
+
+        if (matcher.find()) {
+
+            return matcher.group(1);
+        }
+
+        return null;
+    }
 
     // =========================================================
     // JSON UNESCAPE
     // =========================================================
 
-    /**
-     * Unescape chuỗi JSON cơ bản.
-     */
     private static String unescapeJson(
-            String value) {
+            String text
+    ) {
 
-        if (value == null) {
-            return null;
-        }
-
-        return value
-                .replace(
-                        "\\\"",
-                        "\""
-                )
-                .replace(
-                        "\\\\",
-                        "\\"
-                )
-                .replace(
-                        "\\/",
-                        "/"
-                )
-                .replace(
-                        "\\n",
-                        "\n"
-                )
-                .replace(
-                        "\\r",
-                        "\r"
-                )
-                .replace(
-                        "\\t",
-                        "\t"
-                );
+        return text
+                .replace("\\\"", "\"")
+                .replace("\\\\", "\\")
+                .replace("\\n", "\n")
+                .replace("\\r", "\r")
+                .replace("\\t", "\t");
     }
-
 
     // =========================================================
     // TELEGRAM OFFSET
     // =========================================================
 
-    /**
-     * Đọc update_id cuối cùng.
-     */
-    private static long loadTelegramOffset()
-            throws IOException {
+    private static long loadTelegramOffset() {
 
         if (!Files.exists(
-                TELEGRAM_OFFSET_FILE)) {
+                TELEGRAM_OFFSET_FILE
+        )) {
 
-            return 0;
-        }
-
-        String value =
-                Files.readString(
-                        TELEGRAM_OFFSET_FILE,
-                        StandardCharsets.UTF_8
-                ).trim();
-
-        if (value.isBlank()) {
             return 0;
         }
 
         try {
 
+            String value =
+                    Files.readString(
+                            TELEGRAM_OFFSET_FILE
+                    ).trim();
+
+            if (value.isBlank()) {
+
+                return 0;
+            }
+
             return Long.parseLong(value);
 
-        } catch (NumberFormatException e) {
+        } catch (Exception e) {
 
             return 0;
         }
     }
 
+    private static synchronized void saveTelegramOffset(
+            long offset
+    ) {
 
-    /**
-     * Lưu update_id.
-     */
-    private static void saveTelegramOffset(
-            long updateId)
-            throws IOException {
+        try {
 
-        Files.writeString(
-                TELEGRAM_OFFSET_FILE,
-                String.valueOf(updateId),
-                StandardCharsets.UTF_8,
-                StandardOpenOption.CREATE,
-                StandardOpenOption.TRUNCATE_EXISTING
-        );
+            Files.writeString(
+                    TELEGRAM_OFFSET_FILE,
+                    String.valueOf(offset),
+                    StandardCharsets.UTF_8
+            );
+
+        } catch (IOException e) {
+
+            System.err.println(
+                    "❌ Không thể lưu Telegram offset: " +
+                            e.getMessage()
+            );
+        }
     }
-
 
     // =========================================================
     // ACTIVITY CLASS
@@ -1797,8 +1655,6 @@ public class Main {
         boolean canRegister;
 
         String detail;
-        String registerUrl;
-
 
         Activity(
                 String id,
@@ -1811,23 +1667,14 @@ public class Main {
                 int remainingSlots,
                 String registerStatus,
                 boolean canRegister,
-                String detail,
-                String registerUrl) {
+                String detail
+        ) {
 
-            this.id =
-                    id;
-
-            this.name =
-                    name;
-
-            this.semester =
-                    semester;
-
-            this.points =
-                    points;
-
-            this.endDate =
-                    endDate;
+            this.id = id;
+            this.name = name;
+            this.semester = semester;
+            this.points = points;
+            this.endDate = endDate;
 
             this.registeredSlots =
                     registeredSlots;
@@ -1846,15 +1693,122 @@ public class Main {
 
             this.detail =
                     detail;
+        }
 
-            this.registerUrl =
-                    registerUrl;
+        // -----------------------------------------------------
+        // Save state
+        // -----------------------------------------------------
+
+        String toLine() {
+
+            return String.join(
+                    "|",
+                    escape(id),
+                    escape(name),
+                    escape(semester),
+                    escape(points),
+                    escape(endDate),
+                    String.valueOf(
+                            registeredSlots
+                    ),
+                    String.valueOf(
+                            totalSlots
+                    ),
+                    String.valueOf(
+                            remainingSlots
+                    ),
+                    escape(registerStatus),
+                    String.valueOf(
+                            canRegister
+                    ),
+                    escape(detail)
+            );
+        }
+
+        // -----------------------------------------------------
+        // Load state
+        // -----------------------------------------------------
+
+        static Activity fromLine(
+                String line
+        ) {
+
+            try {
+
+                String[] parts =
+                        line.split(
+                                "\\|",
+                                -1
+                        );
+
+                if (parts.length < 11) {
+
+                    return null;
+                }
+
+                return new Activity(
+                        unescape(parts[0]),
+                        unescape(parts[1]),
+                        unescape(parts[2]),
+                        unescape(parts[3]),
+                        unescape(parts[4]),
+                        Integer.parseInt(
+                                parts[5]
+                        ),
+                        Integer.parseInt(
+                                parts[6]
+                        ),
+                        Integer.parseInt(
+                                parts[7]
+                        ),
+                        unescape(parts[8]),
+                        Boolean.parseBoolean(
+                                parts[9]
+                        ),
+                        unescape(parts[10])
+                );
+
+            } catch (Exception e) {
+
+                return null;
+            }
+        }
+
+        private static String escape(
+                String value
+        ) {
+
+            if (value == null) {
+
+                return "";
+            }
+
+            return value
+                    .replace("\\", "\\\\")
+                    .replace("|", "\\|")
+                    .replace("\n", "\\n")
+                    .replace("\r", "\\r");
+        }
+
+        private static String unescape(
+                String value
+        ) {
+
+            if (value == null) {
+
+                return "";
+            }
+
+            return value
+                    .replace("\\n", "\n")
+                    .replace("\\r", "\r")
+                    .replace("\\|", "|")
+                    .replace("\\\\", "\\");
         }
     }
 
-
     // =========================================================
-    // SLOT INFO CLASS
+    // SLOT INFO
     // =========================================================
 
     private static class SlotInfo {
@@ -1863,11 +1817,11 @@ public class Main {
         int totalSlots;
         int remainingSlots;
 
-
         SlotInfo(
                 int registeredSlots,
                 int totalSlots,
-                int remainingSlots) {
+                int remainingSlots
+        ) {
 
             this.registeredSlots =
                     registeredSlots;
