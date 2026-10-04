@@ -25,6 +25,7 @@ import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -55,7 +56,6 @@ public class Main {
     private static final String ENV_CHAT_ID =
             "TELEGRAM_CHAT_ID";
 
-    // ID Telegram cá nhân của người được phép /cookie
     private static final String ENV_ADMIN_ID =
             "TELEGRAM_ADMIN_ID";
 
@@ -68,7 +68,6 @@ public class Main {
     // Heartbeat mỗi 30 phút
     private static final int HEARTBEAT_MINUTES = 30;
 
-
     // =========================================================
     // HTTP
     // =========================================================
@@ -78,7 +77,6 @@ public class Main {
                     .followRedirects(HttpClient.Redirect.NORMAL)
                     .build();
 
-
     // =========================================================
     // RUNTIME STATE
     // =========================================================
@@ -87,9 +85,20 @@ public class Main {
 
     private static volatile boolean cookieExpiredNotified = false;
 
+    /*
+     * Dùng để tránh nhiều thread cùng check IUH.
+     *
+     * Ví dụ:
+     * - Auto check đang chạy
+     * - User bấm "Kiểm tra ngay"
+     *
+     * => Không tạo 2 request IUH cùng lúc.
+     */
+    private static final AtomicBoolean iuhCheckRunning =
+            new AtomicBoolean(false);
+
     private static final DateTimeFormatter TIME_FORMATTER =
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
-
 
     // =========================================================
     // MAIN
@@ -141,12 +150,15 @@ public class Main {
 
         Runtime.getRuntime().addShutdownHook(
                 new Thread(() -> {
-                    System.out.println("\n🛑 Đang dừng tool...");
+
+                    System.out.println(
+                            "\n🛑 Đang dừng tool..."
+                    );
+
                     scheduler.shutdown();
                 })
         );
     }
-
 
     // =========================================================
     // BANNER
@@ -154,9 +166,17 @@ public class Main {
 
     private static void printBanner() {
 
-        System.out.println("========================================");
-        System.out.println("       IUH EVENT MONITOR");
-        System.out.println("========================================");
+        System.out.println(
+                "========================================"
+        );
+
+        System.out.println(
+                "       IUH EVENT MONITOR"
+        );
+
+        System.out.println(
+                "========================================"
+        );
 
         System.out.println(
                 "IUH      : mỗi " +
@@ -176,9 +196,10 @@ public class Main {
                         " phút"
         );
 
-        System.out.println("========================================");
+        System.out.println(
+                "========================================"
+        );
     }
-
 
     // =========================================================
     // COOKIE
@@ -188,14 +209,13 @@ public class Main {
 
         try {
 
-            // -------------------------------------------------
             // Ưu tiên cookie đã lưu trong file
-            // -------------------------------------------------
-
             if (Files.exists(COOKIE_FILE)) {
 
                 String cookie =
-                        Files.readString(COOKIE_FILE).trim();
+                        Files.readString(
+                                COOKIE_FILE
+                        ).trim();
 
                 if (!cookie.isBlank()) {
 
@@ -209,17 +229,17 @@ public class Main {
                 }
             }
 
-            // -------------------------------------------------
             // Nếu chưa có file thì thử ENV
-            // -------------------------------------------------
-
             String envCookie =
-                    System.getenv(ENV_IUH_COOKIE);
+                    System.getenv(
+                            ENV_IUH_COOKIE
+                    );
 
             if (envCookie != null &&
                     !envCookie.isBlank()) {
 
-                currentCookie = envCookie.trim();
+                currentCookie =
+                        envCookie.trim();
 
                 saveCookie(currentCookie);
 
@@ -251,7 +271,6 @@ public class Main {
         }
     }
 
-
     private static synchronized void saveCookie(
             String cookie
     ) {
@@ -279,9 +298,8 @@ public class Main {
         }
     }
 
-
     // =========================================================
-    // CHECK IUH
+    // AUTO CHECK IUH
     // =========================================================
 
     private static void checkActivities() {
@@ -303,13 +321,29 @@ public class Main {
             return;
         }
 
+        /*
+         * Nếu đang có một lượt check khác:
+         * bỏ qua lượt này.
+         */
+        if (!iuhCheckRunning.compareAndSet(
+                false,
+                true
+        )) {
+
+            System.out.println(
+                    "⏳ Một lượt check IUH khác đang chạy."
+            );
+
+            return;
+        }
+
         try {
 
             Document document =
                     fetchIUHPage();
 
             // -------------------------------------------------
-            // Kiểm tra cookie hết hạn
+            // Cookie hết hạn
             // -------------------------------------------------
 
             if (isLoginPage(document)) {
@@ -349,7 +383,9 @@ public class Main {
             if (oldActivities.isEmpty() &&
                     !Files.exists(ACTIVITIES_FILE)) {
 
-                saveActivities(currentActivities);
+                saveActivities(
+                        currentActivities
+                );
 
                 System.out.println(
                         "📝 Lần chạy đầu tiên → " +
@@ -405,7 +441,9 @@ public class Main {
             // Save latest state
             // -------------------------------------------------
 
-            saveActivities(currentActivities);
+            saveActivities(
+                    currentActivities
+            );
 
         } catch (Exception e) {
 
@@ -413,9 +451,232 @@ public class Main {
                     "❌ Lỗi khi check IUH: " +
                             e.getMessage()
             );
+
+        } finally {
+
+            iuhCheckRunning.set(false);
         }
     }
 
+    // =========================================================
+    // MANUAL CHECK
+    // =========================================================
+
+    private static void checkIUHManually() {
+
+        /*
+         * Nếu auto check hoặc một user khác đang check:
+         * không tạo request thứ hai.
+         */
+        if (!iuhCheckRunning.compareAndSet(
+                false,
+                true
+        )) {
+
+            try {
+
+                sendTelegramMessage(
+                        "⏳ Đang có một lượt kiểm tra IUH khác chạy.\n" +
+                                "Vui lòng thử lại sau vài giây."
+                );
+
+            } catch (Exception e) {
+
+                System.err.println(
+                        "❌ Không gửi được thông báo: " +
+                                e.getMessage()
+                );
+            }
+
+            return;
+        }
+
+        try {
+
+            System.out.println(
+                    "🔎 Kiểm tra IUH thủ công..."
+            );
+
+            if (currentCookie == null ||
+                    currentCookie.isBlank()) {
+
+                sendTelegramMessage(
+                        """
+                        ⚠️ CHƯA CÓ COOKIE IUH
+
+                        Vui lòng cập nhật cookie:
+
+                        /cookie YOUR_COOKIE
+                        """
+                );
+
+                return;
+            }
+
+            Document document =
+                    fetchIUHPage();
+
+            // -------------------------------------------------
+            // Cookie expired
+            // -------------------------------------------------
+
+            if (isLoginPage(document)) {
+
+                handleCookieExpired();
+
+                return;
+            }
+
+            cookieExpiredNotified = false;
+
+            // -------------------------------------------------
+            // Parse current activities
+            // -------------------------------------------------
+
+            List<Activity> activities =
+                    parseActivities(document);
+
+            System.out.println(
+                    "📋 Manual check: " +
+                            activities.size() +
+                            " hoạt động."
+            );
+
+            if (activities.isEmpty()) {
+
+                sendTelegramMessage(
+                        """
+                        🔎 KIỂM TRA IUH NGAY
+
+                        ⚠️ Không tìm thấy hoạt động nào.
+                        """
+                );
+
+                return;
+            }
+
+            // -------------------------------------------------
+            // Build message
+            // -------------------------------------------------
+
+            StringBuilder message =
+                    new StringBuilder();
+
+            message.append(
+                    "🔎 KIỂM TRA IUH NGAY\n\n"
+            );
+
+            message.append("📋 Tìm thấy ")
+                    .append(activities.size())
+                    .append(" hoạt động.\n");
+
+            for (Activity activity :
+                    activities) {
+
+                message.append("\n");
+
+                message.append("📌 ")
+                        .append(activity.name)
+                        .append("\n");
+
+                // Slot
+                if (activity.remainingSlots > 0) {
+
+                    message.append(
+                            "🟢 CÒN SLOT\n"
+                    );
+
+                } else {
+
+                    message.append(
+                            "🔴 HẾT SLOT\n"
+                    );
+                }
+
+                // Điểm
+                message.append("⭐️ Điểm: ")
+                        .append(activity.points)
+                        .append("\n");
+
+                // Slot registered / total
+                message.append("👥 Slot: ")
+                        .append(
+                                activity.registeredSlots
+                        )
+                        .append("/")
+                        .append(
+                                activity.totalSlots
+                        )
+                        .append("\n");
+
+                // Trạng thái
+                message.append(
+                                "📌 Trạng thái: "
+                        )
+                        .append(
+                                activity.registerStatus
+                        )
+                        .append("\n");
+
+                // Deadline
+                message.append(
+                                "⏰ Kết thúc đăng ký: "
+                        )
+                        .append(
+                                activity.endDate
+                        )
+                        .append("\n");
+
+                // Time
+                String time =
+                        extractTime(
+                                activity.detail
+                        );
+
+                if (!time.isBlank()) {
+
+                    message.append(
+                                    "📋 Thời gian: "
+                            )
+                            .append(time)
+                            .append("\n");
+                }
+            }
+
+            sendTelegramMessage(
+                    message.toString()
+            );
+
+        } catch (Exception e) {
+
+            System.err.println(
+                    "❌ Lỗi manual check: " +
+                            e.getMessage()
+            );
+
+            try {
+
+                sendTelegramMessage(
+                        """
+                        ❌ Không thể kiểm tra IUH lúc này.
+
+                        Vui lòng thử lại sau.
+                        """
+                );
+
+            } catch (Exception sendError) {
+
+                System.err.println(
+                        "❌ Không gửi được lỗi Telegram: " +
+                                sendError.getMessage()
+                );
+            }
+
+        } finally {
+
+            iuhCheckRunning.set(false);
+        }
+    }
 
     // =========================================================
     // FETCH IUH
@@ -426,7 +687,9 @@ public class Main {
 
         Connection connection =
                 Jsoup.connect(IUH_URL)
-                        .method(Connection.Method.GET)
+                        .method(
+                                Connection.Method.GET
+                        )
                         .timeout(20_000)
                         .followRedirects(true)
                         .userAgent(
@@ -449,7 +712,6 @@ public class Main {
 
         return connection.get();
     }
-
 
     // =========================================================
     // LOGIN PAGE DETECTION
@@ -499,7 +761,6 @@ public class Main {
                 );
     }
 
-
     // =========================================================
     // COOKIE EXPIRED
     // =========================================================
@@ -527,9 +788,12 @@ public class Main {
 
         try {
 
+            /*
+             * Chỉ đánh dấu đã thông báo nếu
+             * Telegram gửi thành công.
+             */
             sendTelegramMessage(message);
 
-            // Chỉ đánh dấu đã gửi sau khi gửi thành công
             cookieExpiredNotified = true;
 
         } catch (Exception e) {
@@ -540,7 +804,6 @@ public class Main {
             );
         }
     }
-
 
     // =========================================================
     // PARSE ACTIVITIES
@@ -562,6 +825,7 @@ public class Main {
                     table.select("thead th");
 
             if (headers.isEmpty()) {
+
                 continue;
             }
 
@@ -571,17 +835,21 @@ public class Main {
             if (!headerText.contains(
                     "Hoạt động(T/gia)"
             )) {
+
                 continue;
             }
 
             if (!headerText.contains(
                     "Kết thúc đăng ký"
             )) {
+
                 continue;
             }
 
             Elements rows =
-                    table.select("tbody tr");
+                    table.select(
+                            "tbody tr"
+                    );
 
             for (Element row : rows) {
 
@@ -611,7 +879,6 @@ public class Main {
         return activities;
     }
 
-
     // =========================================================
     // PARSE ONE ACTIVITY
     // =========================================================
@@ -625,6 +892,7 @@ public class Main {
                 row.select("> td");
 
         if (cells.size() < 6) {
+
             return null;
         }
 
@@ -633,14 +901,21 @@ public class Main {
         // -----------------------------------------------------
 
         Element link =
-                cells.get(1).selectFirst("a");
+                cells.get(1)
+                        .selectFirst("a");
 
         if (link == null) {
+
             return null;
         }
 
         String rawName =
                 link.text().trim();
+
+        if (rawName.isBlank()) {
+
+            return null;
+        }
 
         // -----------------------------------------------------
         // ID
@@ -672,28 +947,36 @@ public class Main {
         // -----------------------------------------------------
 
         String semester =
-                cells.get(2).text().trim();
+                cells.get(2)
+                        .text()
+                        .trim();
 
         // -----------------------------------------------------
         // Points
         // -----------------------------------------------------
 
         String points =
-                cells.get(3).text().trim();
+                cells.get(3)
+                        .text()
+                        .trim();
 
         // -----------------------------------------------------
         // End date
         // -----------------------------------------------------
 
         String endDate =
-                cells.get(4).text().trim();
+                cells.get(4)
+                        .text()
+                        .trim();
 
         // -----------------------------------------------------
         // Register status
         // -----------------------------------------------------
 
         String registerStatus =
-                cells.get(5).text().trim();
+                cells.get(5)
+                        .text()
+                        .trim();
 
         boolean canRegister =
                 slotInfo.remainingSlots > 0;
@@ -723,9 +1006,8 @@ public class Main {
         );
     }
 
-
     // =========================================================
-    // EXTRACT ID
+    // EXTRACT ACTIVITY ID
     // =========================================================
 
     private static String extractActivityId(
@@ -753,7 +1035,6 @@ public class Main {
 
         return "";
     }
-
 
     // =========================================================
     // PARSE SLOT
@@ -803,7 +1084,6 @@ public class Main {
         );
     }
 
-
     // =========================================================
     // CLEAN ACTIVITY NAME
     // =========================================================
@@ -819,7 +1099,6 @@ public class Main {
                 )
                 .trim();
     }
-
 
     // =========================================================
     // PARSE DETAIL
@@ -858,10 +1137,7 @@ public class Main {
         for (Element br :
                 body.select("br")) {
 
-            br.replaceWith(
-                    new Element("span")
-                            .text("\n")
-            );
+            br.after("\n");
         }
 
         String text =
@@ -875,7 +1151,6 @@ public class Main {
                 )
                 .trim();
     }
-
 
     // =========================================================
     // EXTRACT TIME
@@ -891,24 +1166,6 @@ public class Main {
             return "";
         }
 
-        // Trường hợp detail bị flatten thành một dòng
-        Pattern inlinePattern =
-                Pattern.compile(
-                        "(?:-\\s*)?Thời gian:\\s*(.*?)(?=\\s*-\\s*Địa điểm:|$)",
-                        Pattern.CASE_INSENSITIVE
-                );
-
-        Matcher inlineMatcher =
-                inlinePattern.matcher(detail);
-
-        if (inlineMatcher.find()) {
-
-            return inlineMatcher
-                    .group(1)
-                    .trim();
-        }
-
-        // Trường hợp detail vẫn giữ newline
         for (String line :
                 detail.split("\\R")) {
 
@@ -943,7 +1200,6 @@ public class Main {
         return "";
     }
 
-
     // =========================================================
     // LOAD ACTIVITIES
     // =========================================================
@@ -954,7 +1210,9 @@ public class Main {
         Map<String, Activity> activities =
                 new HashMap<>();
 
-        if (!Files.exists(ACTIVITIES_FILE)) {
+        if (!Files.exists(
+                ACTIVITIES_FILE
+        )) {
 
             return activities;
         }
@@ -970,6 +1228,7 @@ public class Main {
             for (String line : lines) {
 
                 if (line.isBlank()) {
+
                     continue;
                 }
 
@@ -995,7 +1254,6 @@ public class Main {
 
         return activities;
     }
-
 
     // =========================================================
     // SAVE ACTIVITIES
@@ -1033,7 +1291,6 @@ public class Main {
         }
     }
 
-
     // =========================================================
     // TELEGRAM - NEW ACTIVITY
     // =========================================================
@@ -1054,18 +1311,12 @@ public class Main {
 
             message.append("\n");
 
-            // -------------------------------------------------
-            // Tên hoạt động
-            // -------------------------------------------------
-
+            // Tên
             message.append("📌 ")
                     .append(activity.name)
                     .append("\n");
 
-            // -------------------------------------------------
             // Slot status
-            // -------------------------------------------------
-
             if (activity.remainingSlots > 0) {
 
                 message.append(
@@ -1079,48 +1330,41 @@ public class Main {
                 );
             }
 
-            // -------------------------------------------------
             // Điểm
-            // -------------------------------------------------
-
             message.append("⭐️ Điểm: ")
                     .append(activity.points)
                     .append("\n");
 
-            // -------------------------------------------------
-            // Slot registered / total
-            // -------------------------------------------------
-
+            // Slot
             message.append("👥 Slot: ")
-                    .append(activity.registeredSlots)
+                    .append(
+                            activity.registeredSlots
+                    )
                     .append("/")
-                    .append(activity.totalSlots)
+                    .append(
+                            activity.totalSlots
+                    )
                     .append("\n");
 
-            // -------------------------------------------------
             // Trạng thái
-            // -------------------------------------------------
-
             message.append(
                             "📌 Trạng thái: "
                     )
-                    .append(activity.registerStatus)
+                    .append(
+                            activity.registerStatus
+                    )
                     .append("\n");
 
-            // -------------------------------------------------
             // Deadline
-            // -------------------------------------------------
-
             message.append(
                             "⏰ Kết thúc đăng ký: "
                     )
-                    .append(activity.endDate)
+                    .append(
+                            activity.endDate
+                    )
                     .append("\n");
 
-            // -------------------------------------------------
-            // Thời gian
-            // -------------------------------------------------
-
+            // Time
             String time =
                     extractTime(
                             activity.detail
@@ -1141,7 +1385,6 @@ public class Main {
         );
     }
 
-
     // =========================================================
     // TELEGRAM - HEARTBEAT
     // =========================================================
@@ -1152,7 +1395,9 @@ public class Main {
 
             String currentTime =
                     LocalDateTime.now()
-                            .format(TIME_FORMATTER);
+                            .format(
+                                    TIME_FORMATTER
+                            );
 
             String message =
                     """
@@ -1160,7 +1405,9 @@ public class Main {
 
                     ⏱ Thời gian: %s
                     📋 Kiểm tra IUH: mỗi 30 giây
-                    """.formatted(currentTime);
+                    """.formatted(
+                            currentTime
+                    );
 
             sendTelegramMessage(message);
 
@@ -1177,10 +1424,19 @@ public class Main {
         }
     }
 
-
     // =========================================================
     // TELEGRAM - SEND MESSAGE
     // =========================================================
+
+    /*
+     * TẤT CẢ message gửi từ bot đều đi qua method này.
+     *
+     * Vì vậy tất cả message sẽ tự động có:
+     *
+     * [ 🔄 Kiểm tra ngay ]
+     *
+     * Không cần tạo một message button riêng.
+     */
 
     private static void sendTelegramMessage(
             String message
@@ -1214,6 +1470,17 @@ public class Main {
             );
         }
 
+        /*
+         * Inline keyboard.
+         *
+         * callback_data:
+         * check_now
+         */
+        String replyMarkup =
+                """
+                {"inline_keyboard":[[{"text":"🔄 Kiểm tra ngay","callback_data":"check_now"}]]}
+                """;
+
         String url =
                 "https://api.telegram.org/bot" +
                         botToken +
@@ -1227,18 +1494,26 @@ public class Main {
                         URLEncoder.encode(
                                 message,
                                 StandardCharsets.UTF_8
+                        ) +
+                        "&reply_markup=" +
+                        URLEncoder.encode(
+                                replyMarkup,
+                                StandardCharsets.UTF_8
                         );
 
         HttpRequest request =
                 HttpRequest.newBuilder()
-                        .uri(URI.create(url))
+                        .uri(
+                                URI.create(url)
+                        )
                         .GET()
                         .build();
 
         HttpResponse<String> response =
                 HTTP_CLIENT.send(
                         request,
-                        HttpResponse.BodyHandlers.ofString()
+                        HttpResponse.BodyHandlers
+                                .ofString()
                 );
 
         if (response.statusCode() != 200) {
@@ -1251,7 +1526,6 @@ public class Main {
             );
         }
     }
-
 
     // =========================================================
     // TELEGRAM - POLLING
@@ -1285,14 +1559,17 @@ public class Main {
 
             HttpRequest request =
                     HttpRequest.newBuilder()
-                            .uri(URI.create(url))
+                            .uri(
+                                    URI.create(url)
+                            )
                             .GET()
                             .build();
 
             HttpResponse<String> response =
                     HTTP_CLIENT.send(
                             request,
-                            HttpResponse.BodyHandlers.ofString()
+                            HttpResponse.BodyHandlers
+                                    .ofString()
                     );
 
             if (response.statusCode() != 200) {
@@ -1305,7 +1582,7 @@ public class Main {
                 return;
             }
 
-            processTelegramUpdates(
+            processTelegramJson(
                     response.body()
             );
 
@@ -1318,12 +1595,11 @@ public class Main {
         }
     }
 
-
     // =========================================================
-    // TELEGRAM UPDATE PARSER
+    // TELEGRAM JSON
     // =========================================================
 
-    private static void processTelegramUpdates(
+    private static void processTelegramJson(
             String json
     ) {
 
@@ -1334,96 +1610,30 @@ public class Main {
         }
 
         /*
-         * Telegram trả về:
+         * Mỗi update bắt đầu bằng:
          *
-         * {
-         *   "ok":true,
-         *   "result":[
-         *      {
-         *          "update_id":123,
-         *          ...
-         *      }
-         *   ]
-         * }
+         * {"update_id":123,...
          *
-         * Ta lấy từng update_id rồi cắt object tương ứng.
+         * Tách từng update.
          */
-
-        Pattern updatePattern =
+        Pattern pattern =
                 Pattern.compile(
-                        "\"update_id\"\\s*:\\s*(\\d+)"
+                        "\\{\\s*\"update_id\"\\s*:\\s*(\\d+)(.*?)(?=\\{\\s*\"update_id\"\\s*:|\\]\\s*\\}\\s*$)",
+                        Pattern.DOTALL
                 );
 
         Matcher matcher =
-                updatePattern.matcher(json);
-
-        List<Long> updateIds =
-                new ArrayList<>();
-
-        List<Integer> positions =
-                new ArrayList<>();
+                pattern.matcher(json);
 
         while (matcher.find()) {
 
-            updateIds.add(
+            long updateId =
                     Long.parseLong(
                             matcher.group(1)
-                    )
-            );
-
-            positions.add(
-                    matcher.start()
-            );
-        }
-
-        for (int i = 0;
-             i < updateIds.size();
-             i++) {
-
-            long updateId =
-                    updateIds.get(i);
-
-            int updateIdPosition =
-                    positions.get(i);
-
-            int objectStart =
-                    json.lastIndexOf(
-                            "{",
-                            updateIdPosition
                     );
-
-            if (objectStart < 0) {
-                continue;
-            }
-
-            int objectEnd;
-
-            if (i + 1 < positions.size()) {
-
-                int nextUpdateIdPosition =
-                        positions.get(i + 1);
-
-                objectEnd =
-                        json.lastIndexOf(
-                                "{",
-                                nextUpdateIdPosition
-                        );
-
-            } else {
-
-                objectEnd =
-                        json.lastIndexOf("}");
-            }
-
-            if (objectEnd <= objectStart) {
-                continue;
-            }
 
             String updateJson =
-                    json.substring(
-                            objectStart,
-                            objectEnd
-                    );
+                    matcher.group(0);
 
             processSingleTelegramUpdate(
                     updateId,
@@ -1431,7 +1641,6 @@ public class Main {
             );
         }
     }
-
 
     // =========================================================
     // PROCESS TELEGRAM UPDATE
@@ -1450,12 +1659,80 @@ public class Main {
         if (configuredChatId == null ||
                 configuredChatId.isBlank()) {
 
+            saveTelegramOffset(updateId);
+
             return;
         }
 
-        // -----------------------------------------------------
-        // Chat ID
-        // -----------------------------------------------------
+        // =====================================================
+        // 1. CALLBACK QUERY
+        // =====================================================
+
+        String callbackChatId =
+                extractJsonValue(
+                        updateJson,
+                        "\"callback_query\"\\s*:\\s*\\{.*?\"message\"\\s*:\\s*\\{.*?\"chat\"\\s*:\\s*\\{.*?\"id\"\\s*:\\s*(-?\\d+)"
+                );
+
+        if (callbackChatId != null) {
+
+            // Chỉ xử lý callback từ group đã cấu hình
+            if (!configuredChatId.equals(
+                    callbackChatId
+            )) {
+
+                saveTelegramOffset(updateId);
+
+                return;
+            }
+
+            String callbackData =
+                    extractJsonValue(
+                            updateJson,
+                            "\"callback_query\"\\s*:\\s*\\{.*?\"data\"\\s*:\\s*\"([^\"]*)\""
+                    );
+
+            String callbackId =
+                    extractJsonValue(
+                            updateJson,
+                            "\"callback_query\"\\s*:\\s*\\{.*?\"id\"\\s*:\\s*\"([^\"]+)\""
+                    );
+
+            System.out.println(
+                    "🔘 Telegram callback: " +
+                            callbackData
+            );
+
+            /*
+             * Phản hồi Telegram ngay lập tức
+             * để nút không còn trạng thái loading.
+             */
+            if (callbackId != null) {
+
+                answerCallbackQuery(
+                        callbackId
+                );
+            }
+
+            // -------------------------------------------------
+            // Kiểm tra ngay
+            // -------------------------------------------------
+
+            if ("check_now".equals(
+                    callbackData
+            )) {
+
+                checkIUHManually();
+            }
+
+            saveTelegramOffset(updateId);
+
+            return;
+        }
+
+        // =====================================================
+        // 2. NORMAL MESSAGE
+        // =====================================================
 
         String chatId =
                 extractJsonValue(
@@ -1470,36 +1747,17 @@ public class Main {
             return;
         }
 
-        // Chỉ xử lý message trong group đã cấu hình
-        if (!configuredChatId.equals(chatId)) {
+        /*
+         * Chỉ nhận command từ group cấu hình.
+         */
+        if (!configuredChatId.equals(
+                chatId
+        )) {
 
             saveTelegramOffset(updateId);
 
             return;
         }
-
-        // -----------------------------------------------------
-        // Người gửi
-        //
-        // from.id = Telegram User ID
-        // -----------------------------------------------------
-
-        String userId =
-                extractJsonValue(
-                        updateJson,
-                        "\"from\"\\s*:\\s*\\{.*?\"id\"\\s*:\\s*(\\d+)"
-                );
-
-        if (userId == null) {
-
-            saveTelegramOffset(updateId);
-
-            return;
-        }
-
-        // -----------------------------------------------------
-        // Message text
-        // -----------------------------------------------------
 
         String text =
                 extractJsonValue(
@@ -1519,15 +1777,23 @@ public class Main {
                         .trim();
 
         System.out.println(
-                "📨 Telegram [" +
-                        userId +
-                        "]: " +
+                "📨 Telegram: " +
                         text
         );
 
-        // -----------------------------------------------------
+        // =====================================================
+        // USER ID
+        // =====================================================
+
+        String userId =
+                extractJsonValue(
+                        updateJson,
+                        "\"from\"\\s*:\\s*\\{.*?\"id\"\\s*:\\s*(\\d+)"
+                );
+
+        // =====================================================
         // /start
-        // -----------------------------------------------------
+        // =====================================================
 
         if (text.equalsIgnoreCase(
                 "/start"
@@ -1541,9 +1807,7 @@ public class Main {
 
                         Tool đang hoạt động.
 
-                        📢 Bot sẽ gửi thông báo hoạt động mới vào group.
-
-                        🍪 Chỉ admin mới được cập nhật cookie:
+                        🍪 Cập nhật cookie:
                         /cookie YOUR_COOKIE
 
                         ⏱ Check IUH: mỗi 30 giây
@@ -1560,26 +1824,28 @@ public class Main {
             }
         }
 
-        // -----------------------------------------------------
+        // =====================================================
         // /cookie
-        // -----------------------------------------------------
+        // =====================================================
 
         else if (
-                text.equalsIgnoreCase("/cookie")
-                        ||
+                text.equalsIgnoreCase(
+                        "/cookie"
+                ) ||
                         text.toLowerCase()
-                                .startsWith("/cookie ")
+                                .startsWith(
+                                        "/cookie "
+                                )
         ) {
-
-            // -------------------------------------------------
-            // Kiểm tra quyền
-            // -------------------------------------------------
 
             String adminId =
                     System.getenv(
                             ENV_ADMIN_ID
                     );
 
+            /*
+             * Chỉ admin được phép đổi cookie.
+             */
             if (adminId == null ||
                     adminId.isBlank()) {
 
@@ -1588,32 +1854,15 @@ public class Main {
                                 ENV_ADMIN_ID
                 );
 
-                try {
-
-                    sendTelegramMessage(
-                            "⚠️ Bot chưa cấu hình Telegram Admin ID."
-                    );
-
-                } catch (Exception e) {
-
-                    System.err.println(
-                            "❌ Không gửi được thông báo: " +
-                                    e.getMessage()
-                    );
-                }
-
                 saveTelegramOffset(updateId);
 
                 return;
             }
 
-            // Không phải admin
-            if (!adminId.equals(userId)) {
-
-                System.out.println(
-                        "⛔ Từ chối /cookie từ user " +
-                                userId
-                );
+            if (userId == null ||
+                    !adminId.equals(
+                            userId
+                    )) {
 
                 try {
 
@@ -1638,15 +1887,18 @@ public class Main {
             // Lấy cookie
             // -------------------------------------------------
 
-            if (text.equalsIgnoreCase("/cookie")) {
+            if (text.equalsIgnoreCase(
+                    "/cookie"
+            )) {
 
                 try {
 
                     sendTelegramMessage(
                             """
-                            ❌ Cookie không được để trống.
+                            ⚠️ Thiếu cookie IUH.
 
                             Cú pháp:
+
                             /cookie YOUR_COOKIE
                             """
                     );
@@ -1666,23 +1918,40 @@ public class Main {
 
             String newCookie =
                     text.substring(
-                            "/cookie ".length()
+                            "/cookie".length()
                     ).trim();
 
             if (newCookie.isBlank()) {
+
+                try {
+
+                    sendTelegramMessage(
+                            """
+                            ⚠️ Cookie không được để trống.
+
+                            Cú pháp:
+
+                            /cookie YOUR_COOKIE
+                            """
+                    );
+
+                } catch (Exception e) {
+
+                    System.err.println(
+                            "❌ Không gửi được thông báo: " +
+                                    e.getMessage()
+                    );
+                }
 
                 saveTelegramOffset(updateId);
 
                 return;
             }
 
-            // -------------------------------------------------
-            // Lưu cookie mới
-            // -------------------------------------------------
-
             saveCookie(newCookie);
 
-            cookieExpiredNotified = false;
+            cookieExpiredNotified =
+                    false;
 
             try {
 
@@ -1704,13 +1973,66 @@ public class Main {
             }
         }
 
-        // -----------------------------------------------------
-        // Save offset
-        // -----------------------------------------------------
+        // =====================================================
+        // SAVE OFFSET
+        // =====================================================
 
         saveTelegramOffset(updateId);
     }
 
+    // =========================================================
+    // ANSWER CALLBACK QUERY
+    // =========================================================
+
+    private static void answerCallbackQuery(
+            String callbackId
+    ) {
+
+        try {
+
+            String botToken =
+                    System.getenv(
+                            ENV_BOT_TOKEN
+                    );
+
+            if (botToken == null ||
+                    botToken.isBlank()) {
+
+                return;
+            }
+
+            String url =
+                    "https://api.telegram.org/bot" +
+                            botToken +
+                            "/answerCallbackQuery" +
+                            "?callback_query_id=" +
+                            URLEncoder.encode(
+                                    callbackId,
+                                    StandardCharsets.UTF_8
+                            );
+
+            HttpRequest request =
+                    HttpRequest.newBuilder()
+                            .uri(
+                                    URI.create(url)
+                            )
+                            .GET()
+                            .build();
+
+            HTTP_CLIENT.send(
+                    request,
+                    HttpResponse.BodyHandlers
+                            .ofString()
+            );
+
+        } catch (Exception e) {
+
+            System.err.println(
+                    "❌ Không answer callback: " +
+                            e.getMessage()
+            );
+        }
+    }
 
     // =========================================================
     // JSON VALUE
@@ -1738,7 +2060,6 @@ public class Main {
         return null;
     }
 
-
     // =========================================================
     // JSON UNESCAPE
     // =========================================================
@@ -1754,7 +2075,6 @@ public class Main {
                 .replace("\\r", "\r")
                 .replace("\\t", "\t");
     }
-
 
     // =========================================================
     // TELEGRAM OFFSET
@@ -1789,7 +2109,6 @@ public class Main {
         }
     }
 
-
     private static synchronized void saveTelegramOffset(
             long offset
     ) {
@@ -1811,7 +2130,6 @@ public class Main {
         }
     }
 
-
     // =========================================================
     // ACTIVITY CLASS
     // =========================================================
@@ -1832,7 +2150,6 @@ public class Main {
         boolean canRegister;
 
         String detail;
-
 
         Activity(
                 String id,
@@ -1873,7 +2190,6 @@ public class Main {
                     detail;
         }
 
-
         // -----------------------------------------------------
         // Save state
         // -----------------------------------------------------
@@ -1903,7 +2219,6 @@ public class Main {
                     escape(detail)
             );
         }
-
 
         // -----------------------------------------------------
         // Load state
@@ -1954,7 +2269,6 @@ public class Main {
             }
         }
 
-
         private static String escape(
                 String value
         ) {
@@ -1965,12 +2279,23 @@ public class Main {
             }
 
             return value
-                    .replace("\\", "\\\\")
-                    .replace("|", "\\|")
-                    .replace("\n", "\\n")
-                    .replace("\r", "\\r");
+                    .replace(
+                            "\\",
+                            "\\\\"
+                    )
+                    .replace(
+                            "|",
+                            "\\|"
+                    )
+                    .replace(
+                            "\n",
+                            "\\n"
+                    )
+                    .replace(
+                            "\r",
+                            "\\r"
+                    );
         }
-
 
         private static String unescape(
                 String value
@@ -1982,13 +2307,24 @@ public class Main {
             }
 
             return value
-                    .replace("\\n", "\n")
-                    .replace("\\r", "\r")
-                    .replace("\\|", "|")
-                    .replace("\\\\", "\\");
+                    .replace(
+                            "\\n",
+                            "\n"
+                    )
+                    .replace(
+                            "\\r",
+                            "\r"
+                    )
+                    .replace(
+                            "\\|",
+                            "|"
+                    )
+                    .replace(
+                            "\\\\",
+                            "\\"
+                    );
         }
     }
-
 
     // =========================================================
     // SLOT INFO
@@ -1999,7 +2335,6 @@ public class Main {
         int registeredSlots;
         int totalSlots;
         int remainingSlots;
-
 
         SlotInfo(
                 int registeredSlots,
