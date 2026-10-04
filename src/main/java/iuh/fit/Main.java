@@ -55,6 +55,10 @@ public class Main {
     private static final String ENV_CHAT_ID =
             "TELEGRAM_CHAT_ID";
 
+    // ID Telegram cá nhân của người được phép /cookie
+    private static final String ENV_ADMIN_ID =
+            "TELEGRAM_ADMIN_ID";
+
     // Check IUH mỗi 30 giây
     private static final int ACTIVITY_CHECK_SECONDS = 30;
 
@@ -64,6 +68,7 @@ public class Main {
     // Heartbeat mỗi 30 phút
     private static final int HEARTBEAT_MINUTES = 30;
 
+
     // =========================================================
     // HTTP
     // =========================================================
@@ -72,6 +77,7 @@ public class Main {
             HttpClient.newBuilder()
                     .followRedirects(HttpClient.Redirect.NORMAL)
                     .build();
+
 
     // =========================================================
     // RUNTIME STATE
@@ -83,6 +89,7 @@ public class Main {
 
     private static final DateTimeFormatter TIME_FORMATTER =
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+
 
     // =========================================================
     // MAIN
@@ -140,6 +147,7 @@ public class Main {
         );
     }
 
+
     // =========================================================
     // BANNER
     // =========================================================
@@ -149,23 +157,28 @@ public class Main {
         System.out.println("========================================");
         System.out.println("       IUH EVENT MONITOR");
         System.out.println("========================================");
+
         System.out.println(
                 "IUH      : mỗi " +
                         ACTIVITY_CHECK_SECONDS +
                         " giây"
         );
+
         System.out.println(
                 "Telegram : mỗi " +
                         TELEGRAM_CHECK_SECONDS +
                         " giây"
         );
+
         System.out.println(
                 "Heartbeat: mỗi " +
                         HEARTBEAT_MINUTES +
                         " phút"
         );
+
         System.out.println("========================================");
     }
+
 
     // =========================================================
     // COOKIE
@@ -175,7 +188,10 @@ public class Main {
 
         try {
 
+            // -------------------------------------------------
             // Ưu tiên cookie đã lưu trong file
+            // -------------------------------------------------
+
             if (Files.exists(COOKIE_FILE)) {
 
                 String cookie =
@@ -193,7 +209,10 @@ public class Main {
                 }
             }
 
+            // -------------------------------------------------
             // Nếu chưa có file thì thử ENV
+            // -------------------------------------------------
+
             String envCookie =
                     System.getenv(ENV_IUH_COOKIE);
 
@@ -232,6 +251,7 @@ public class Main {
         }
     }
 
+
     private static synchronized void saveCookie(
             String cookie
     ) {
@@ -258,6 +278,7 @@ public class Main {
             );
         }
     }
+
 
     // =========================================================
     // CHECK IUH
@@ -395,6 +416,7 @@ public class Main {
         }
     }
 
+
     // =========================================================
     // FETCH IUH
     // =========================================================
@@ -427,6 +449,7 @@ public class Main {
 
         return connection.get();
     }
+
 
     // =========================================================
     // LOGIN PAGE DETECTION
@@ -476,6 +499,7 @@ public class Main {
                 );
     }
 
+
     // =========================================================
     // COOKIE EXPIRED
     // =========================================================
@@ -491,14 +515,12 @@ public class Main {
             return;
         }
 
-        cookieExpiredNotified = true;
-
         String message =
                 """
                 ⚠️ IUH EVENT MONITOR
-                
+
                 🍪 Cookie IUH đã hết hạn.
-                
+
                 Vui lòng gửi cookie mới:
                 /cookie YOUR_COOKIE
                 """;
@@ -506,6 +528,9 @@ public class Main {
         try {
 
             sendTelegramMessage(message);
+
+            // Chỉ đánh dấu đã gửi sau khi gửi thành công
+            cookieExpiredNotified = true;
 
         } catch (Exception e) {
 
@@ -515,6 +540,7 @@ public class Main {
             );
         }
     }
+
 
     // =========================================================
     // PARSE ACTIVITIES
@@ -584,6 +610,7 @@ public class Main {
 
         return activities;
     }
+
 
     // =========================================================
     // PARSE ONE ACTIVITY
@@ -696,6 +723,7 @@ public class Main {
         );
     }
 
+
     // =========================================================
     // EXTRACT ID
     // =========================================================
@@ -725,6 +753,7 @@ public class Main {
 
         return "";
     }
+
 
     // =========================================================
     // PARSE SLOT
@@ -774,6 +803,7 @@ public class Main {
         );
     }
 
+
     // =========================================================
     // CLEAN ACTIVITY NAME
     // =========================================================
@@ -789,6 +819,7 @@ public class Main {
                 )
                 .trim();
     }
+
 
     // =========================================================
     // PARSE DETAIL
@@ -827,7 +858,10 @@ public class Main {
         for (Element br :
                 body.select("br")) {
 
-            br.after("\\n");
+            br.replaceWith(
+                    new Element("span")
+                            .text("\n")
+            );
         }
 
         String text =
@@ -841,6 +875,7 @@ public class Main {
                 )
                 .trim();
     }
+
 
     // =========================================================
     // EXTRACT TIME
@@ -856,6 +891,24 @@ public class Main {
             return "";
         }
 
+        // Trường hợp detail bị flatten thành một dòng
+        Pattern inlinePattern =
+                Pattern.compile(
+                        "(?:-\\s*)?Thời gian:\\s*(.*?)(?=\\s*-\\s*Địa điểm:|$)",
+                        Pattern.CASE_INSENSITIVE
+                );
+
+        Matcher inlineMatcher =
+                inlinePattern.matcher(detail);
+
+        if (inlineMatcher.find()) {
+
+            return inlineMatcher
+                    .group(1)
+                    .trim();
+        }
+
+        // Trường hợp detail vẫn giữ newline
         for (String line :
                 detail.split("\\R")) {
 
@@ -889,6 +942,7 @@ public class Main {
 
         return "";
     }
+
 
     // =========================================================
     // LOAD ACTIVITIES
@@ -942,6 +996,7 @@ public class Main {
         return activities;
     }
 
+
     // =========================================================
     // SAVE ACTIVITIES
     // =========================================================
@@ -978,6 +1033,7 @@ public class Main {
         }
     }
 
+
     // =========================================================
     // TELEGRAM - NEW ACTIVITY
     // =========================================================
@@ -998,12 +1054,18 @@ public class Main {
 
             message.append("\n");
 
+            // -------------------------------------------------
             // Tên hoạt động
+            // -------------------------------------------------
+
             message.append("📌 ")
                     .append(activity.name)
                     .append("\n");
 
-            // Slot
+            // -------------------------------------------------
+            // Slot status
+            // -------------------------------------------------
+
             if (activity.remainingSlots > 0) {
 
                 message.append(
@@ -1017,33 +1079,48 @@ public class Main {
                 );
             }
 
+            // -------------------------------------------------
             // Điểm
+            // -------------------------------------------------
+
             message.append("⭐️ Điểm: ")
                     .append(activity.points)
                     .append("\n");
 
+            // -------------------------------------------------
             // Slot registered / total
+            // -------------------------------------------------
+
             message.append("👥 Slot: ")
                     .append(activity.registeredSlots)
                     .append("/")
                     .append(activity.totalSlots)
                     .append("\n");
 
+            // -------------------------------------------------
             // Trạng thái
+            // -------------------------------------------------
+
             message.append(
                             "📌 Trạng thái: "
                     )
                     .append(activity.registerStatus)
                     .append("\n");
 
+            // -------------------------------------------------
             // Deadline
+            // -------------------------------------------------
+
             message.append(
                             "⏰ Kết thúc đăng ký: "
                     )
                     .append(activity.endDate)
                     .append("\n");
 
-            // Chỉ lấy thời gian
+            // -------------------------------------------------
+            // Thời gian
+            // -------------------------------------------------
+
             String time =
                     extractTime(
                             activity.detail
@@ -1064,6 +1141,7 @@ public class Main {
         );
     }
 
+
     // =========================================================
     // TELEGRAM - HEARTBEAT
     // =========================================================
@@ -1079,7 +1157,7 @@ public class Main {
             String message =
                     """
                     💚 IUH EVENT MONITOR ĐANG HOẠT ĐỘNG
-                    
+
                     ⏱ Thời gian: %s
                     📋 Kiểm tra IUH: mỗi 30 giây
                     """.formatted(currentTime);
@@ -1098,6 +1176,7 @@ public class Main {
             );
         }
     }
+
 
     // =========================================================
     // TELEGRAM - SEND MESSAGE
@@ -1173,6 +1252,7 @@ public class Main {
         }
     }
 
+
     // =========================================================
     // TELEGRAM - POLLING
     // =========================================================
@@ -1225,7 +1305,7 @@ public class Main {
                 return;
             }
 
-            processTelegramJson(
+            processTelegramUpdates(
                     response.body()
             );
 
@@ -1238,11 +1318,12 @@ public class Main {
         }
     }
 
+
     // =========================================================
-    // TELEGRAM JSON PARSER
+    // TELEGRAM UPDATE PARSER
     // =========================================================
 
-    private static void processTelegramJson(
+    private static void processTelegramUpdates(
             String json
     ) {
 
@@ -1252,145 +1333,97 @@ public class Main {
             return;
         }
 
+        /*
+         * Telegram trả về:
+         *
+         * {
+         *   "ok":true,
+         *   "result":[
+         *      {
+         *          "update_id":123,
+         *          ...
+         *      }
+         *   ]
+         * }
+         *
+         * Ta lấy từng update_id rồi cắt object tương ứng.
+         */
+
         Pattern updatePattern =
                 Pattern.compile(
                         "\"update_id\"\\s*:\\s*(\\d+)"
                 );
 
-        Matcher updateMatcher =
+        Matcher matcher =
                 updatePattern.matcher(json);
 
-        while (updateMatcher.find()) {
+        List<Long> updateIds =
+                new ArrayList<>();
+
+        List<Integer> positions =
+                new ArrayList<>();
+
+        while (matcher.find()) {
+
+            updateIds.add(
+                    Long.parseLong(
+                            matcher.group(1)
+                    )
+            );
+
+            positions.add(
+                    matcher.start()
+            );
+        }
+
+        for (int i = 0;
+             i < updateIds.size();
+             i++) {
 
             long updateId =
-                    Long.parseLong(
-                            updateMatcher.group(1)
+                    updateIds.get(i);
+
+            int updateIdPosition =
+                    positions.get(i);
+
+            int objectStart =
+                    json.lastIndexOf(
+                            "{",
+                            updateIdPosition
                     );
 
-            int start =
-                    updateMatcher.start();
-
-            int nextStart;
-
-            if (updateMatcher.find()) {
-
-                nextStart =
-                        updateMatcher.start();
-
-                updateMatcher.reset();
-
-                // Không dùng cách này vì matcher
-                // bị reset
+            if (objectStart < 0) {
+                continue;
             }
 
-            // Tách update bằng cách tìm object tiếp theo
-            int objectStart =
-                    json.indexOf(
-                            "{",
-                            start
-                    );
+            int objectEnd;
 
-            int objectEnd =
-                    findNextUpdateStart(
-                            json,
-                            start
-                    );
+            if (i + 1 < positions.size()) {
 
-            String updateJson;
+                int nextUpdateIdPosition =
+                        positions.get(i + 1);
 
-            if (objectEnd > objectStart) {
-
-                updateJson =
-                        json.substring(
-                                objectStart,
-                                objectEnd
+                objectEnd =
+                        json.lastIndexOf(
+                                "{",
+                                nextUpdateIdPosition
                         );
 
             } else {
 
-                updateJson =
-                        json.substring(
-                                objectStart
-                        );
+                objectEnd =
+                        json.lastIndexOf("}");
             }
 
-            processSingleTelegramUpdate(
-                    updateId,
-                    updateJson
-            );
-
-            // -------------------------------------------------
-            // Vì regex matcher ở trên đã khó xử lý next match
-            // nên thoát để dùng parser riêng bên dưới.
-            // -------------------------------------------------
-
-            break;
-        }
-
-        // Dùng parser ổn định hơn
-        processTelegramUpdatesSafely(json);
-    }
-
-    // =========================================================
-    // FIND NEXT UPDATE
-    // =========================================================
-
-    private static int findNextUpdateStart(
-            String json,
-            int currentStart
-    ) {
-
-        int next =
-                json.indexOf(
-                        "\"update_id\"",
-                        currentStart + 1
-                );
-
-        if (next < 0) {
-
-            return json.length();
-        }
-
-        int objectStart =
-                json.lastIndexOf(
-                        "{",
-                        next
-                );
-
-        if (objectStart < 0) {
-
-            return json.length();
-        }
-
-        return objectStart;
-    }
-
-    // =========================================================
-    // SAFE TELEGRAM UPDATE PARSER
-    // =========================================================
-
-    private static void processTelegramUpdatesSafely(
-            String json
-    ) {
-
-        Pattern updatePattern =
-                Pattern.compile(
-                        "\\{\\s*\"update_id\"\\s*:\\s*(\\d+)(.*?)(?=\\{\\s*\"update_id\"\\s*:|\\]\\s*\\}\\s*$)",
-                        Pattern.DOTALL
-                );
-
-        Matcher matcher =
-                updatePattern.matcher(json);
-
-        while (matcher.find()) {
-
-            long updateId =
-                    Long.parseLong(
-                            matcher.group(1)
-                    );
+            if (objectEnd <= objectStart) {
+                continue;
+            }
 
             String updateJson =
-                    matcher.group(0);
+                    json.substring(
+                            objectStart,
+                            objectEnd
+                    );
 
             processSingleTelegramUpdate(
                     updateId,
@@ -1398,6 +1431,7 @@ public class Main {
             );
         }
     }
+
 
     // =========================================================
     // PROCESS TELEGRAM UPDATE
@@ -1419,6 +1453,10 @@ public class Main {
             return;
         }
 
+        // -----------------------------------------------------
+        // Chat ID
+        // -----------------------------------------------------
+
         String chatId =
                 extractJsonValue(
                         updateJson,
@@ -1427,15 +1465,41 @@ public class Main {
 
         if (chatId == null) {
 
+            saveTelegramOffset(updateId);
+
             return;
         }
 
+        // Chỉ xử lý message trong group đã cấu hình
         if (!configuredChatId.equals(chatId)) {
 
             saveTelegramOffset(updateId);
 
             return;
         }
+
+        // -----------------------------------------------------
+        // Người gửi
+        //
+        // from.id = Telegram User ID
+        // -----------------------------------------------------
+
+        String userId =
+                extractJsonValue(
+                        updateJson,
+                        "\"from\"\\s*:\\s*\\{.*?\"id\"\\s*:\\s*(\\d+)"
+                );
+
+        if (userId == null) {
+
+            saveTelegramOffset(updateId);
+
+            return;
+        }
+
+        // -----------------------------------------------------
+        // Message text
+        // -----------------------------------------------------
 
         String text =
                 extractJsonValue(
@@ -1455,7 +1519,9 @@ public class Main {
                         .trim();
 
         System.out.println(
-                "📨 Telegram: " +
+                "📨 Telegram [" +
+                        userId +
+                        "]: " +
                         text
         );
 
@@ -1472,12 +1538,14 @@ public class Main {
                 sendTelegramMessage(
                         """
                         🤖 IUH EVENT MONITOR
-                        
+
                         Tool đang hoạt động.
-                        
-                        🍪 Cập nhật cookie:
+
+                        📢 Bot sẽ gửi thông báo hoạt động mới vào group.
+
+                        🍪 Chỉ admin mới được cập nhật cookie:
                         /cookie YOUR_COOKIE
-                        
+
                         ⏱ Check IUH: mỗi 30 giây
                         💚 Heartbeat: mỗi 30 phút
                         """
@@ -1496,39 +1564,143 @@ public class Main {
         // /cookie
         // -----------------------------------------------------
 
-        else if (text.toLowerCase()
-                .startsWith("/cookie ")) {
+        else if (
+                text.equalsIgnoreCase("/cookie")
+                        ||
+                        text.toLowerCase()
+                                .startsWith("/cookie ")
+        ) {
 
-            String newCookie =
-                    text.substring(
-                            "/cookie ".length()
-                    ).trim();
+            // -------------------------------------------------
+            // Kiểm tra quyền
+            // -------------------------------------------------
 
-            if (!newCookie.isBlank()) {
+            String adminId =
+                    System.getenv(
+                            ENV_ADMIN_ID
+                    );
 
-                saveCookie(newCookie);
+            if (adminId == null ||
+                    adminId.isBlank()) {
 
-                cookieExpiredNotified =
-                        false;
+                System.err.println(
+                        "⚠️ Chưa cấu hình " +
+                                ENV_ADMIN_ID
+                );
+
+                try {
+
+                    sendTelegramMessage(
+                            "⚠️ Bot chưa cấu hình Telegram Admin ID."
+                    );
+
+                } catch (Exception e) {
+
+                    System.err.println(
+                            "❌ Không gửi được thông báo: " +
+                                    e.getMessage()
+                    );
+                }
+
+                saveTelegramOffset(updateId);
+
+                return;
+            }
+
+            // Không phải admin
+            if (!adminId.equals(userId)) {
+
+                System.out.println(
+                        "⛔ Từ chối /cookie từ user " +
+                                userId
+                );
+
+                try {
+
+                    sendTelegramMessage(
+                            "⛔ Bạn không có quyền cập nhật cookie IUH."
+                    );
+
+                } catch (Exception e) {
+
+                    System.err.println(
+                            "❌ Không gửi được thông báo quyền: " +
+                                    e.getMessage()
+                    );
+                }
+
+                saveTelegramOffset(updateId);
+
+                return;
+            }
+
+            // -------------------------------------------------
+            // Lấy cookie
+            // -------------------------------------------------
+
+            if (text.equalsIgnoreCase("/cookie")) {
 
                 try {
 
                     sendTelegramMessage(
                             """
-                            ✅ Đã cập nhật cookie IUH.
-                            
-                            🔄 Tool sẽ tiếp tục kiểm tra IUH.
-                            ⏱ Chu kỳ kiểm tra: 30 giây.
+                            ❌ Cookie không được để trống.
+
+                            Cú pháp:
+                            /cookie YOUR_COOKIE
                             """
                     );
 
                 } catch (Exception e) {
 
                     System.err.println(
-                            "❌ Không gửi được xác nhận cookie: " +
+                            "❌ Không gửi được hướng dẫn cookie: " +
                                     e.getMessage()
                     );
                 }
+
+                saveTelegramOffset(updateId);
+
+                return;
+            }
+
+            String newCookie =
+                    text.substring(
+                            "/cookie ".length()
+                    ).trim();
+
+            if (newCookie.isBlank()) {
+
+                saveTelegramOffset(updateId);
+
+                return;
+            }
+
+            // -------------------------------------------------
+            // Lưu cookie mới
+            // -------------------------------------------------
+
+            saveCookie(newCookie);
+
+            cookieExpiredNotified = false;
+
+            try {
+
+                sendTelegramMessage(
+                        """
+                        ✅ Đã cập nhật cookie IUH.
+
+                        🔄 Tool sẽ tiếp tục kiểm tra IUH.
+                        ⏱ Chu kỳ kiểm tra: 30 giây.
+                        """
+                );
+
+            } catch (Exception e) {
+
+                System.err.println(
+                        "❌ Không gửi được xác nhận cookie: " +
+                                e.getMessage()
+                );
             }
         }
 
@@ -1538,6 +1710,7 @@ public class Main {
 
         saveTelegramOffset(updateId);
     }
+
 
     // =========================================================
     // JSON VALUE
@@ -1565,6 +1738,7 @@ public class Main {
         return null;
     }
 
+
     // =========================================================
     // JSON UNESCAPE
     // =========================================================
@@ -1580,6 +1754,7 @@ public class Main {
                 .replace("\\r", "\r")
                 .replace("\\t", "\t");
     }
+
 
     // =========================================================
     // TELEGRAM OFFSET
@@ -1614,6 +1789,7 @@ public class Main {
         }
     }
 
+
     private static synchronized void saveTelegramOffset(
             long offset
     ) {
@@ -1635,6 +1811,7 @@ public class Main {
         }
     }
 
+
     // =========================================================
     // ACTIVITY CLASS
     // =========================================================
@@ -1655,6 +1832,7 @@ public class Main {
         boolean canRegister;
 
         String detail;
+
 
         Activity(
                 String id,
@@ -1695,6 +1873,7 @@ public class Main {
                     detail;
         }
 
+
         // -----------------------------------------------------
         // Save state
         // -----------------------------------------------------
@@ -1724,6 +1903,7 @@ public class Main {
                     escape(detail)
             );
         }
+
 
         // -----------------------------------------------------
         // Load state
@@ -1774,6 +1954,7 @@ public class Main {
             }
         }
 
+
         private static String escape(
                 String value
         ) {
@@ -1789,6 +1970,7 @@ public class Main {
                     .replace("\n", "\\n")
                     .replace("\r", "\\r");
         }
+
 
         private static String unescape(
                 String value
@@ -1807,6 +1989,7 @@ public class Main {
         }
     }
 
+
     // =========================================================
     // SLOT INFO
     // =========================================================
@@ -1816,6 +1999,7 @@ public class Main {
         int registeredSlots;
         int totalSlots;
         int remainingSlots;
+
 
         SlotInfo(
                 int registeredSlots,
