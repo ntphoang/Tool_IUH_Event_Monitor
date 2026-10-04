@@ -1401,6 +1401,7 @@ public class Main {
 
             String message =
                     """
+                    🔔 THÔNG BÁO ĐỊNH KỲ
                     💚 IUH EVENT MONITOR ĐANG HOẠT ĐỘNG
 
                     ⏱ Thời gian: %s
