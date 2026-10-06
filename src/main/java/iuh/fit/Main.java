@@ -66,7 +66,7 @@ public class Main {
     private static final int TELEGRAM_CHECK_SECONDS = 5;
 
     // Heartbeat mỗi 30 phút
-    private static final int HEARTBEAT_MINUTES = 30;
+    private static final int HEARTBEAT_MINUTES = 24 * 60;
 
     // =========================================================
     // HTTP
