@@ -1303,6 +1303,10 @@ public class Main {
                 new StringBuilder();
 
         message.append(
+                "🚨🚨 THÔNG BÁO KHẨN CẤP 🚨🚨\n"
+        );
+
+        message.append(
                 "🆕 IUH CÓ HOẠT ĐỘNG MỚI!\n"
         );
 
